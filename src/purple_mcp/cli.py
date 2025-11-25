@@ -71,11 +71,13 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def _apply_environment_overrides(
+    transport_mode: str | None,
     sdl_api_token: str | None,
     graphql_service_token: str | None,
     console_base_url: str | None,
     graphql_endpoint: str | None,
     alerts_graphql_endpoint: str | None,
+    stateless_http: bool | None,
 ) -> None:
     """Apply CLI argument values to environment variables.
 
@@ -83,12 +85,16 @@ def _apply_environment_overrides(
     configuration to override environment variable defaults.
 
     Args:
+        transport_mode: MCP transport mode to use.
         sdl_api_token: SDL API authentication token
         graphql_service_token: GraphQL service authentication token
         console_base_url: Base URL for the console
         graphql_endpoint: GraphQL endpoint path
         alerts_graphql_endpoint: Alerts GraphQL endpoint path
+        stateless_http: Uses true stateless mode (new transport per request)
     """
+    if transport_mode:
+        os.environ[f"{ENV_PREFIX}TRANSPORT_MODE"] = transport_mode
     if sdl_api_token:
         os.environ[f"{ENV_PREFIX}SDL_READ_LOGS_TOKEN"] = sdl_api_token
     if graphql_service_token:
@@ -102,6 +108,8 @@ def _apply_environment_overrides(
         and alerts_graphql_endpoint != "/web/api/v2.1/unifiedalerts/graphql"
     ):
         os.environ[f"{ENV_PREFIX}ALERTS_GRAPHQL_ENDPOINT"] = alerts_graphql_endpoint
+    if stateless_http:
+        os.environ[f"{ENV_PREFIX}STATELESS_HTTP"] = str(stateless_http)
 
 
 def _check_unsupported_config() -> None:
@@ -240,6 +248,7 @@ def _run_uvicorn(
     port: int,
     verbose: bool,
     allow_remote_access: bool,
+    stateless_http: bool,
 ) -> None:  # pragma: no cover - uvicorn is mocked in unit-tests
     """Run the HTTP/SSE transport using *uvicorn*."""
     # Validate host binding for security
@@ -258,7 +267,8 @@ def _run_uvicorn(
         from purple_mcp.server import app
 
         # Create the HTTP app and instrument it if Logfire is enabled
-        http_app = app.http_app(transport=transport)
+        # n.b. stateless_http has no effect if running in "sse" transport mode.
+        http_app = app.http_app(transport=transport, stateless_http=stateless_http)
         instrument_starlette_app(http_app)
 
         uvicorn.run(
@@ -280,6 +290,7 @@ def _run_mode(
     verbose: bool,
     no_banner: bool = False,
     allow_remote_access: bool = False,
+    stateless_http: bool = False,
 ) -> None:
     """Dispatch to the appropriate server runner for *mode*."""
     mode_normalised = mode.lower()
@@ -287,7 +298,12 @@ def _run_mode(
     runners: Mapping[str, Callable[[], None]] = {
         "stdio": lambda: _run_stdio(verbose, no_banner),
         "sse": lambda: _run_uvicorn(
-            "sse", host=host, port=port, verbose=verbose, allow_remote_access=allow_remote_access
+            "sse",
+            host=host,
+            port=port,
+            verbose=verbose,
+            allow_remote_access=allow_remote_access,
+            stateless_http=stateless_http,
         ),
         "streamable-http": lambda: _run_uvicorn(
             "streamable-http",
@@ -295,6 +311,7 @@ def _run_mode(
             port=port,
             verbose=verbose,
             allow_remote_access=allow_remote_access,
+            stateless_http=stateless_http,
         ),
     }
 
@@ -308,6 +325,7 @@ def _run_mode(
     "-m",
     type=click.Choice(VALID_MODES, case_sensitive=False),
     default="stdio",
+    envvar=f"{ENV_PREFIX}TRANSPORT_MODE",
     help="MCP transport mode to use",
 )
 @click.option(
@@ -365,6 +383,15 @@ def _run_mode(
     is_flag=True,
     help="Allow binding to non-loopback interfaces (SECURITY RISK: exposes unauthenticated tools)",
 )
+@click.option(
+    "--stateless-http",
+    is_flag=True,
+    envvar=f"{ENV_PREFIX}STATELESS_HTTP",
+    help=(
+        "Uses true stateless mode (new transport per request). This flag only has an effect if running in"
+        " http or streamable_http modes."
+    ),
+)
 def main(
     mode: str,
     host: str,
@@ -377,6 +404,7 @@ def main(
     verbose: bool,
     banner: bool,
     allow_remote_access: bool,
+    stateless_http: bool,
 ) -> None:
     """Purple MCP Server - AI monitoring and analysis tool."""
     _setup_logging(verbose)
@@ -385,11 +413,13 @@ def main(
     _check_unsupported_config()
 
     _apply_environment_overrides(
+        transport_mode=mode,
         sdl_api_token=sdl_api_token,
         graphql_service_token=graphql_service_token,
         console_base_url=console_base_url,
         graphql_endpoint=graphql_endpoint,
         alerts_graphql_endpoint=alerts_graphql_endpoint,
+        stateless_http=stateless_http,
     )
 
     settings = _create_settings()
@@ -406,6 +436,7 @@ def main(
         verbose=verbose,
         no_banner=not banner,
         allow_remote_access=allow_remote_access,
+        stateless_http=stateless_http,
     )
 
 
