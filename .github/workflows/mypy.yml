@@ -16,11 +16,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Python and uv
         uses: ./.github/actions/setup-python-uv
 
       - name: Run mypy check
         run: |
-          uv run --group dev mypy
+          uv run mypy src tests
