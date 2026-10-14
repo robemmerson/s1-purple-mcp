@@ -11,6 +11,8 @@ services:
       # Required: SentinelOne Console configuration
       PURPLEMCP_CONSOLE_BASE_URL: ${PURPLEMCP_CONSOLE_BASE_URL}
       PURPLEMCP_CONSOLE_TOKEN: ${PURPLEMCP_CONSOLE_TOKEN}
+      # Required for HTTP modes on 0.0.0.0: clients send "Authorization: Bearer <MCP_API_KEY>"
+      MCP_API_KEY: ${MCP_API_KEY:-}
 
       # Optional: Transport configuration
       PURPLEMCP_STATELESS_HTTP: ${PURPLEMCP_STATELESS_HTTP:-false}
@@ -45,6 +47,9 @@ services:
       # Required: SentinelOne Console configuration
       PURPLEMCP_CONSOLE_BASE_URL: ${PURPLEMCP_CONSOLE_BASE_URL}
       PURPLEMCP_CONSOLE_TOKEN: ${PURPLEMCP_CONSOLE_TOKEN}
+      # Required for HTTP modes on 0.0.0.0: clients send "Authorization: Bearer <MCP_API_KEY>".
+      # Behind purple-mcp-proxy (which forwards the header), use the same value as PURPLEMCP_AUTH_TOKEN.
+      MCP_API_KEY: ${MCP_API_KEY:-}
       # Optional: Custom GraphQL endpoints
       PURPLEMCP_CONSOLE_GRAPHQL_ENDPOINT: ${PURPLEMCP_CONSOLE_GRAPHQL_ENDPOINT:-/web/api/v2.1/graphql}
       PURPLEMCP_ALERTS_GRAPHQL_ENDPOINT: ${PURPLEMCP_ALERTS_GRAPHQL_ENDPOINT:-/web/api/v2.1/unifiedalerts/graphql}
@@ -82,6 +87,9 @@ services:
       # Required: SentinelOne Console configuration
       PURPLEMCP_CONSOLE_BASE_URL: ${PURPLEMCP_CONSOLE_BASE_URL}
       PURPLEMCP_CONSOLE_TOKEN: ${PURPLEMCP_CONSOLE_TOKEN}
+      # Required for HTTP modes on 0.0.0.0: clients send "Authorization: Bearer <MCP_API_KEY>".
+      # Behind purple-mcp-proxy (which forwards the header), use the same value as PURPLEMCP_AUTH_TOKEN.
+      MCP_API_KEY: ${MCP_API_KEY:-}
       # Optional: Custom GraphQL endpoints
       PURPLEMCP_CONSOLE_GRAPHQL_ENDPOINT: ${PURPLEMCP_CONSOLE_GRAPHQL_ENDPOINT:-/web/api/v2.1/graphql}
       PURPLEMCP_ALERTS_GRAPHQL_ENDPOINT: ${PURPLEMCP_ALERTS_GRAPHQL_ENDPOINT:-/web/api/v2.1/unifiedalerts/graphql}

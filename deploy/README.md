@@ -24,13 +24,31 @@ docker build -t purple-mcp:latest .
 # Run with your credentials
 export PURPLEMCP_CONSOLE_TOKEN="your_token"
 export PURPLEMCP_CONSOLE_BASE_URL="https://your-console.sentinelone.net"
+# API key clients must send as "Authorization: Bearer <key>" (required for HTTP modes on 0.0.0.0)
+export MCP_API_KEY="$(openssl rand -base64 32)"
 
 docker run -p 8000:8000 \
   -e PURPLEMCP_CONSOLE_TOKEN \
   -e PURPLEMCP_CONSOLE_BASE_URL \
+  -e MCP_API_KEY \
   -e MCP_MODE=streamable-http \
   purple-mcp:latest
+
+# Health check (no key needed)
+curl http://localhost:8000/health
+
+# MCP requests need the key
+curl -X POST http://localhost:8000/mcp \
+  -H "Authorization: Bearer $MCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 ```
+
+In `sse`/`streamable-http` mode the container binds `0.0.0.0` by default, so `MCP_API_KEY` is
+required: without it the server refuses to start. Only `/health` is served without the key. When
+running behind the bundled nginx proxy (`docker compose --profile proxy`), which forwards the
+`Authorization` header, set `MCP_API_KEY` to the same value as `PURPLEMCP_AUTH_TOKEN`.
 
 Follow more detailed instructions Docker Deployment [here](docker/DOCKER.md)
 
@@ -42,6 +60,7 @@ Follow more detailed instructions Docker Deployment [here](docker/DOCKER.md)
 #Prepare Environment Variables
 PURPLEMCP_CONSOLE_BASE_URL=https://your-console.sentinelone.net
 PURPLEMCP_CONSOLE_TOKEN=your-token
+MCP_API_KEY=your-api-key
 MCP_MODE=streamable-http
 PURPLEMCP_STATELESS_HTTP=True
 ```
@@ -57,12 +76,32 @@ Follow mode detailed instructions for Amazon Bedrock AgentCore Deployment
 #Prepare Environment Variables
 PURPLEMCP_CONSOLE_BASE_URL=https://your-console.sentinelone.net
 PURPLEMCP_CONSOLE_TOKEN=your-token
+MCP_API_KEY=your-api-key
 MCP_MODE=streamable-http
 PURPLEMCP_STATELESS_HTTP=True
 ```
 
 Follow more detailed instructions for Amazon Elastic Container Service Deployment
 [here](aws_ecs/AMAZON_ECS_DEPLOYMENT.md)
+
+### Using Azure Container Apps
+
+Azure's ingress terminates TLS in front of the container. Store the key as a Container Apps secret
+and expose it as `MCP_API_KEY`; MCP clients (for example a Microsoft Foundry agent) then send
+`Authorization: Bearer <key>`.
+
+```bash
+#Prepare Environment Variables
+PURPLEMCP_CONSOLE_BASE_URL=https://your-console.sentinelone.net
+PURPLEMCP_CONSOLE_TOKEN=secretref:console-token
+MCP_API_KEY=secretref:mcp-api-key
+MCP_MODE=streamable-http
+MCP_HOST=0.0.0.0
+PURPLEMCP_STATELESS_HTTP=true
+```
+
+Point the ingress health probes at `GET /health` (no key needed) and the MCP client at
+`https://<app>.<env>.<region>.azurecontainerapps.io/mcp`.
 
 ### Cloud Native Setup
 

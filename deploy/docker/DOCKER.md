@@ -72,6 +72,10 @@ Configure the server using these variables:
 | `MCP_HOST` | `0.0.0.0` | Host to bind to (for SSE/HTTP modes)                 |
 | `MCP_PORT` | `8000`    | Port to bind to (for SSE/HTTP modes)                 |
 
+For `sse`/`streamable-http` on a non-loopback host (the default `0.0.0.0`), `MCP_API_KEY` is
+required and clients must send `Authorization: Bearer <MCP_API_KEY>`; the server refuses to start
+without it. `/health` stays open.
+
 CLI arguments work when running outside Docker (via `uvx` or `uv run`).
 
 ### Streamable-HTTP (Recommended)
@@ -80,6 +84,7 @@ CLI arguments work when running outside Docker (via `uvx` or `uv run`).
 docker run -p 8000:8000 \
   -e PURPLEMCP_CONSOLE_TOKEN \
   -e PURPLEMCP_CONSOLE_BASE_URL \
+  -e MCP_API_KEY \
   -e MCP_MODE=streamable-http \
   purple-mcp:latest
 ```
@@ -90,6 +95,7 @@ docker run -p 8000:8000 \
 docker run -p 8000:8000 \
   -e PURPLEMCP_CONSOLE_TOKEN \
   -e PURPLEMCP_CONSOLE_BASE_URL \
+  -e MCP_API_KEY \
   -e MCP_MODE=sse \
   purple-mcp:latest
 ```
@@ -148,6 +154,8 @@ docker compose --profile release up
 - `MCP_MODE` - Transport mode: `stdio`, `sse`, or `streamable-http` (default: `stdio`)
 - `MCP_HOST` - Host to bind to for SSE/HTTP modes (default: `0.0.0.0`)
 - `MCP_PORT` - Port to bind to for SSE/HTTP modes (default: `8000`)
+- `MCP_API_KEY` - API key clients send as `Authorization: Bearer <key>`; required for SSE/HTTP
+  modes on a non-loopback host
 
 **Optional:**
 
