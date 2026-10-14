@@ -156,6 +156,8 @@ docker compose --profile release up
 - `MCP_PORT` - Port to bind to for SSE/HTTP modes (default: `8000`)
 - `MCP_API_KEY` - API key clients send as `Authorization: Bearer <key>`; required for SSE/HTTP
   modes on a non-loopback host
+- `MCP_TOOL_ERRORS_AS_TEXT` - Return tool errors as `ERROR: ...` text with `isError: false` (default:
+  `false`); for clients such as Microsoft Foundry Agent Service that abort on `isError: true`
 
 **Optional:**
 

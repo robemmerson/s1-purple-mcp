@@ -11,6 +11,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Bearer API-key authentication for the `sse` and `streamable-http` transports via `MCP_API_KEY`
   (or `--api-key`). Requests without `Authorization: Bearer <key>` get `401`; `/health` stays open.
+- Opt-in `MCP_TOOL_ERRORS_AS_TEXT` mode that returns tool errors as `ERROR: <message>` text results
+  with `isError: false`, for clients such as Microsoft Foundry Agent Service that abort the run on
+  `isError: true`. Off by default.
 
 ### Changed
 

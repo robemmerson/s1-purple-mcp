@@ -98,7 +98,13 @@ MCP_API_KEY=secretref:mcp-api-key
 MCP_MODE=streamable-http
 MCP_HOST=0.0.0.0
 PURPLEMCP_STATELESS_HTTP=true
+MCP_TOOL_ERRORS_AS_TEXT=true
 ```
+
+Foundry Agent Service ends the agent run with `tool_user_error` whenever a tool result has
+`isError: true`. `MCP_TOOL_ERRORS_AS_TEXT=true` returns those errors as ordinary `ERROR: ...` text
+results instead, so the model can read the message, fix its arguments and retry. Leave it unset for
+clients that handle `isError` themselves.
 
 Point the ingress health probes at `GET /health` (no key needed) and the MCP client at
 `https://<app>.<env>.<region>.azurecontainerapps.io/mcp`.

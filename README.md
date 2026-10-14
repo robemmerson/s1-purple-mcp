@@ -346,6 +346,12 @@ Query VirusTotal/Google Threat Intelligence for file, URL, domain, and IP analys
 - `MCP_API_KEY` - API key that `sse`/`streamable-http` clients must send as
   `Authorization: Bearer <key>` (CLI: `--api-key`). Required when binding to a non-loopback host.
   Note: no `PURPLEMCP_` prefix.
+- `MCP_TOOL_ERRORS_AS_TEXT` - Return tool errors as ordinary results (`isError: false`) whose text
+  is `ERROR: <message>`, instead of `isError: true` results (default: `false`; accepts
+  `true`/`1`/`yes`, case-insensitive). Covers errors raised by tools, unexpected exceptions,
+  argument validation failures and unknown tool names; each conversion is logged as a warning.
+  Enable it only for clients that abort the run on `isError: true` (for example Microsoft Foundry
+  Agent Service), so the model sees the error and can retry. Note: no `PURPLEMCP_` prefix.
 - `PURPLEMCP_STATELESS_HTTP` - Enable stateless HTTP mode for serverless deployments (e.g., Amazon
   Bedrock AgentCore) - see [deployment guide](deploy/aws_agentcore/BEDROCK_AGENTCORE_DEPLOYMENT.md)
 
