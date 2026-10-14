@@ -52,6 +52,7 @@ from starlette.responses import JSONResponse
 
 from purple_mcp.config import Settings, get_settings
 from purple_mcp.observability import initialize_logfire, instrument_starlette_app
+from purple_mcp.tool_errors import install_tool_errors_as_text, tool_errors_as_text_enabled
 from purple_mcp.tools.alerts import (
     GET_ALERT_DESCRIPTION,
     GET_ALERT_HISTORY_DESCRIPTION,
@@ -174,6 +175,9 @@ app.tool(description=THREAT_INTEL_GET_FILE_BEHAVIOR_DESCRIPTION)(threat_intel_ge
 app.tool(description=CVE_SEARCH_BY_ID_DESCRIPTION)(cve_search_by_id)
 app.tool(description=CVE_SEARCH_BY_VENDOR_DESCRIPTION)(cve_search_by_vendor)
 app.tool(description=CVE_DATABASE_STATUS_DESCRIPTION)(cve_database_status)
+
+if tool_errors_as_text_enabled():
+    install_tool_errors_as_text(app)
 
 
 @app.custom_route("/health", methods=["GET"])
