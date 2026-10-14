@@ -48,10 +48,10 @@ case "$MCP_MODE" in
         ;;
 esac
 
-if [ "$ALLOW_REMOTE_ACCESS" = "true" ]; then
-    echo "WARNING: Purple MCP is binding to non-loopback address ($MCP_HOST) without built-in authentication." >&2
-    echo "For release environments, ensure this service runs behind a reverse proxy or load balancer." >&2
-    echo "See: https://github.com/Sentinel-One/purple-mcp/blob/main/deploy/cloud/CLOUD_SETUP.md" >&2
+if [ "$ALLOW_REMOTE_ACCESS" = "true" ] && [ -z "${MCP_API_KEY:-}" ]; then
+    echo "ERROR: Purple MCP is binding to non-loopback address ($MCP_HOST) but MCP_API_KEY is not set." >&2
+    echo "Set MCP_API_KEY to a strong random value (e.g. openssl rand -base64 32); clients must then" >&2
+    echo "send 'Authorization: Bearer <MCP_API_KEY>'. The server will refuse to start without it." >&2
     echo "" >&2
 fi
 

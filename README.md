@@ -72,10 +72,13 @@ Follow instructions for Amazon Elastic Container Service Deployment
 
 For cloud deployments, see [Deployment Guide](deploy/cloud/CLOUD_SETUP.md).
 
-**Note:** Purple AI MCP does not include built-in authentication. For network-exposed deployments,
-place it behind a reverse proxy or load balancer. See [cloud Setup](deploy/cloud/CLOUD_SETUP.md)
-for cloud load balancer configurations (AWS ALB, GCP Cloud Load Balancing, Azure Application
-Gateway) or nginx examples for self-hosted deployments.
+**Note:** When the `sse` or `streamable-http` transport binds to a non-loopback address, the server
+requires an API key in `MCP_API_KEY` (or `--api-key`) and refuses to start without one. Clients must
+send it as `Authorization: Bearer <MCP_API_KEY>`; only `/health` is served without it. See
+[HTTP API key authentication](#http-api-key-authentication). Serve it over HTTPS (a TLS-terminating
+ingress, load balancer or reverse proxy) so the key is never sent in clear text. See
+[cloud Setup](deploy/cloud/CLOUD_SETUP.md) for cloud load balancer configurations (AWS ALB, GCP
+Cloud Load Balancing, Azure Application Gateway) or nginx examples for self-hosted deployments.
 
 ---
 
@@ -102,6 +105,30 @@ PURPLEMCP_PURPLE_AI_CONSOLE_ACCOUNT_ID=1234567890123456789
 ```
 
 This will scope Purple AI queries to account-scope with id `1234567890123456789`.
+
+### HTTP API key authentication
+
+The `sse` and `streamable-http` transports can require a static API key from MCP clients. It is
+mandatory when binding to a non-loopback host (for example `0.0.0.0` in a container), and the server
+refuses to start without it, even with `--allow-remote-access`. On `localhost` it is optional: the
+server starts without one and logs a warning. `stdio` mode ignores it.
+
+```bash
+# Generate a key and start the server with it
+export MCP_API_KEY="$(openssl rand -base64 32)"
+purple-mcp --mode streamable-http --host 0.0.0.0 --allow-remote-access   # or --api-key "$MCP_API_KEY"
+
+# Clients send it as a bearer token
+curl -X POST https://your-host/mcp \
+  -H "Authorization: Bearer $MCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+```
+
+Requests without `Authorization: Bearer <key>` (scheme case-insensitive, key compared in constant
+time) get `401` with `WWW-Authenticate: Bearer realm="purple-mcp"`. `GET /health` stays open for
+container and load-balancer health checks. The key is redacted from logs.
 
 **Health Check Endpoints:**
 
@@ -212,8 +239,10 @@ uvx --from git+https://github.com/Sentinel-One/purple-mcp.git purple-mcp --mode 
 npx -y mcp-remote http://127.0.0.1:8000/mcp
 ```
 
-We suggest you **do not** expose Purple AI MCP on a network at this time, as there is no
-authentication enforced and anyone could access a configured SentinelOne account.
+If you expose the server on a network, set `MCP_API_KEY` (see
+[HTTP API key authentication](#http-api-key-authentication)) and serve it over HTTPS. Anyone holding
+the key can query the configured SentinelOne account. With a key set, connect with
+`npx -y mcp-remote https://your-host/mcp --header "Authorization: Bearer ${MCP_API_KEY}"`.
 
 ## Available Tools
 
@@ -314,6 +343,9 @@ Query VirusTotal/Google Threat Intelligence for file, URL, domain, and IP analys
   - **Note:** Currently, only the first site ID is used.
 - `PURPLEMCP_TRANSPORT_MODE` - MCP transport mode: `stdio`, `http`, `streamable-http`, or `sse`
   (default: `stdio`)
+- `MCP_API_KEY` - API key that `sse`/`streamable-http` clients must send as
+  `Authorization: Bearer <key>` (CLI: `--api-key`). Required when binding to a non-loopback host.
+  Note: no `PURPLEMCP_` prefix.
 - `PURPLEMCP_STATELESS_HTTP` - Enable stateless HTTP mode for serverless deployments (e.g., Amazon
   Bedrock AgentCore) - see [deployment guide](deploy/aws_agentcore/BEDROCK_AGENTCORE_DEPLOYMENT.md)
 

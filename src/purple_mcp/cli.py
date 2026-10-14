@@ -16,11 +16,15 @@ from typing import Literal
 
 import click
 import uvicorn
+from starlette.types import ASGIApp
 
 from purple_mcp.config import ENV_PREFIX, Settings
+from purple_mcp.http_auth import API_KEY_ENV, BearerAuth
 from purple_mcp.observability import instrument_starlette_app
 
 VALID_MODES: tuple[str, ...] = ("stdio", "sse", "streamable-http")
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -159,44 +163,63 @@ def _create_settings() -> Settings:
         sys.exit(1)
 
 
-def _validate_http_binding(host: str, allow_remote_access: bool) -> None:
+def _validate_http_binding(host: str, allow_remote_access: bool, api_key: str | None) -> None:
     """Validate HTTP binding for security.
 
-    Prevents binding to non-loopback interfaces without explicit consent to avoid
-    exposing unauthenticated MCP tools to the network.
+    Binding to a non-loopback interface requires both explicit consent
+    (--allow-remote-access) and an API key, so the MCP tools are never exposed to the
+    network unauthenticated. Loopback binding without an API key is allowed but logs a
+    warning.
 
     Args:
         host: The host address to bind to
         allow_remote_access: Whether remote access has been explicitly allowed
+        api_key: The bearer API key clients must send, if configured
 
     Raises:
-        SystemExit: If binding to non-loopback without --allow-remote-access flag
+        SystemExit: If binding to non-loopback without --allow-remote-access or an API key
     """
-    if not _is_loopback_host(host) and not allow_remote_access:
-        click.echo("", err=True)
-        click.echo("✗ SECURITY ERROR: Refusing to bind to non-loopback interface", err=True)
-        click.echo("", err=True)
+    if _is_loopback_host(host):
+        if not api_key:
+            logger.warning(
+                "%s is not set: the HTTP transport on %s accepts unauthenticated requests",
+                API_KEY_ENV,
+                host,
+            )
+        return
+
+    if allow_remote_access and api_key:
+        return
+
+    click.echo("", err=True)
+    click.echo("✗ SECURITY ERROR: Refusing to bind to non-loopback interface", err=True)
+    click.echo("", err=True)
+    if not api_key:
         click.echo(
-            f"  Binding to '{host}' would expose unauthenticated MCP tools to the network.",
+            f"  Binding to '{host}' without {API_KEY_ENV} would expose unauthenticated MCP tools"
+            " to the network.",
             err=True,
         )
         click.echo(
             "  This could allow remote invocation of tools and potential data exfiltration.",
             err=True,
         )
-        click.echo("", err=True)
-        click.echo("  Options:", err=True)
-        click.echo("    1. Use --host localhost (recommended for local development)", err=True)
-        click.echo(
-            "    2. Use --allow-remote-access flag if you understand the security risks",
-            err=True,
-        )
-        click.echo("", err=True)
-        sys.exit(1)
+    else:
+        click.echo(f"  Binding to '{host}' exposes the MCP tools to the network.", err=True)
+    click.echo("", err=True)
+    click.echo("  Options:", err=True)
+    click.echo("    1. Use --host localhost (recommended for local development)", err=True)
+    click.echo(
+        f"    2. Set {API_KEY_ENV} (or --api-key) AND pass --allow-remote-access; clients must"
+        " then send 'Authorization: Bearer <key>'",
+        err=True,
+    )
+    click.echo("", err=True)
+    sys.exit(1)
 
 
 def _display_security_warning(host: str) -> None:
-    """Display a prominent security warning when binding to non-loopback interfaces.
+    """Display a prominent security notice when binding to non-loopback interfaces.
 
     Args:
         host: The host address being bound to
@@ -207,17 +230,17 @@ def _display_security_warning(host: str) -> None:
     click.echo("=" * 80, err=True)
     click.echo("", err=True)
     click.echo(f"  Binding to: {host}", err=True)
-    click.echo("", err=True)
-    click.echo("  SECURITY RISKS:", err=True)
-    click.echo("    - MCP server exposes unauthenticated HTTP/SSE interface", err=True)
-    click.echo("    - All registered tools can be invoked remotely", err=True)
-    click.echo("    - Service tokens and credentials may be accessible", err=True)
-    click.echo("    - Data exfiltration is possible if process has valid tokens", err=True)
+    click.echo(
+        f"  Bearer API key authentication is enforced ({API_KEY_ENV}); /health is open.",
+        err=True,
+    )
     click.echo("", err=True)
     click.echo("  RECOMMENDED PROTECTIONS:", err=True)
-    click.echo("    - Use a firewall to restrict access to trusted IPs", err=True)
-    click.echo("    - Run behind a reverse proxy with authentication", err=True)
-    click.echo("    - Use network policies to limit exposure", err=True)
+    click.echo(
+        "    - Serve over HTTPS (e.g. a TLS-terminating ingress or reverse proxy)", err=True
+    )
+    click.echo("    - Keep the API key in a secret store and rotate it if exposed", err=True)
+    click.echo("    - Use a firewall or network policies to restrict access", err=True)
     click.echo("    - Monitor for unexpected tool invocations", err=True)
     click.echo("", err=True)
     click.echo("=" * 80, err=True)
@@ -251,10 +274,11 @@ def _run_uvicorn(
     verbose: bool,
     allow_remote_access: bool,
     stateless_http: bool,
+    api_key: str | None = None,
 ) -> None:  # pragma: no cover - uvicorn is mocked in unit-tests
     """Run the HTTP/SSE transport using *uvicorn*."""
     # Validate host binding for security
-    _validate_http_binding(host, allow_remote_access)
+    _validate_http_binding(host, allow_remote_access, api_key)
 
     # Display warning if running on non-loopback
     if not _is_loopback_host(host):
@@ -273,8 +297,10 @@ def _run_uvicorn(
         http_app = app.http_app(transport=transport, stateless_http=stateless_http)
         instrument_starlette_app(http_app)
 
+        asgi_app: ASGIApp = BearerAuth(http_app, api_key) if api_key else http_app
+
         uvicorn.run(
-            http_app,
+            asgi_app,
             host=host,
             port=port,
             log_level="info" if verbose else "warning",
@@ -293,6 +319,7 @@ def _run_mode(
     no_banner: bool = False,
     allow_remote_access: bool = False,
     stateless_http: bool = False,
+    api_key: str | None = None,
 ) -> None:
     """Dispatch to the appropriate server runner for *mode*."""
     mode_normalised = mode.lower()
@@ -306,6 +333,7 @@ def _run_mode(
             verbose=verbose,
             allow_remote_access=allow_remote_access,
             stateless_http=stateless_http,
+            api_key=api_key,
         ),
         "streamable-http": lambda: _run_uvicorn(
             "streamable-http",
@@ -314,6 +342,7 @@ def _run_mode(
             verbose=verbose,
             allow_remote_access=allow_remote_access,
             stateless_http=stateless_http,
+            api_key=api_key,
         ),
     }
 
@@ -383,7 +412,15 @@ def _run_mode(
 @click.option(
     "--allow-remote-access",
     is_flag=True,
-    help="Allow binding to non-loopback interfaces (SECURITY RISK: exposes unauthenticated tools)",
+    help=f"Allow binding to non-loopback interfaces (also requires --api-key / {API_KEY_ENV})",
+)
+@click.option(
+    "--api-key",
+    envvar=API_KEY_ENV,
+    help=(
+        "API key that SSE/HTTP clients must send as 'Authorization: Bearer <key>'."
+        f" Required when binding to a non-loopback host. (env: {API_KEY_ENV})"
+    ),
 )
 @click.option(
     "--stateless-http",
@@ -407,9 +444,16 @@ def main(
     banner: bool,
     allow_remote_access: bool,
     stateless_http: bool,
+    api_key: str | None,
 ) -> None:
     """Purple MCP Server - AI monitoring and analysis tool."""
     _setup_logging(verbose)
+
+    api_key = (api_key or "").strip() or None
+    if api_key:
+        from purple_mcp.logging_security import register_secret
+
+        register_secret(api_key)
 
     # Check for unsupported configuration and warn user
     _check_unsupported_config()
@@ -440,6 +484,7 @@ def main(
         no_banner=not banner,
         allow_remote_access=allow_remote_access,
         stateless_http=stateless_http,
+        api_key=api_key,
     )
 
 

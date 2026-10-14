@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Bearer API-key authentication for the `sse` and `streamable-http` transports via `MCP_API_KEY`
+  (or `--api-key`). Requests without `Authorization: Bearer <key>` get `401`; `/health` stays open.
+
+### Changed
+
+- **Breaking:** binding an HTTP transport to a non-loopback host now requires `MCP_API_KEY`, even
+  with `--allow-remote-access`. The server refuses to start without it.
+
 ## [0.7.0]
 
 ### Added

@@ -143,6 +143,7 @@ jobs:
             -e PURPLEMCP_CONSOLE_BASE_URL="${{ secrets.CONSOLE_BASE_URL }}" \
             -e MCP_MODE=${{ matrix.env_mode }} \
             -e MCP_PORT=${{ matrix.port }} \
+            -e MCP_API_KEY=ci-test-api-key \
             purple-mcp:${{ github.sha }}
 
           # Wait for server to start with retry logic
@@ -166,6 +167,17 @@ jobs:
             fi
             sleep 3
           done
+
+          # MCP endpoints require the API key; /health (checked above) does not
+          endpoint=$([ "${{ matrix.mode }}" = "sse" ] && echo /sse || echo /mcp)
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://localhost:${{ matrix.port }}$endpoint)
+          if [ "$http_code" != "401" ]; then
+            echo "✗ Expected 401 from $endpoint without API key, got $http_code"
+            docker logs purple-mcp-${{ matrix.mode }}-test
+            docker stop purple-mcp-${{ matrix.mode }}-test || true
+            exit 1
+          fi
+          echo "✓ $endpoint correctly returns 401 without API key"
 
           # Cleanup
           docker stop purple-mcp-${{ matrix.mode }}-test
@@ -333,6 +345,8 @@ jobs:
       - name: Test proxy configuration
         run: |
           export PURPLEMCP_AUTH_TOKEN="test-token-12345"
+          # nginx forwards the Authorization header, so the backend accepts the same key
+          export MCP_API_KEY="$PURPLEMCP_AUTH_TOKEN"
           export PURPLEMCP_CONSOLE_TOKEN="${{ secrets.CONSOLE_TOKEN }}"
           export PURPLEMCP_CONSOLE_BASE_URL="${{ secrets.CONSOLE_BASE_URL }}"
 

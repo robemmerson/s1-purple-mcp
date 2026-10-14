@@ -9,10 +9,13 @@ from collections.abc import Generator
 from unittest.mock import Mock, patch
 
 import pytest
+import uvicorn
 from click.testing import CliRunner
 
+from purple_mcp import cli, logging_security
 from purple_mcp.cli import _run_mode, main
-from purple_mcp.config import ENV_PREFIX
+from purple_mcp.config import ENV_PREFIX, Settings
+from purple_mcp.http_auth import API_KEY_ENV, BearerAuth
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +100,8 @@ class TestCLIArgumentParsing:
                     "--port",
                     "9000",
                     "--allow-remote-access",
+                    "--api-key",
+                    "test-api-key",
                 ],
             )
 
@@ -483,6 +488,7 @@ class TestModeDispatcher:
                 verbose=False,
                 allow_remote_access=False,
                 stateless_http=False,
+                api_key=None,
             )
 
     def test_streamable_http_mode_dispatch(self) -> None:
@@ -504,6 +510,7 @@ class TestModeDispatcher:
                 verbose=True,
                 allow_remote_access=True,
                 stateless_http=False,
+                api_key=None,
             )
 
     def test_case_insensitive_mode_dispatch(self) -> None:
@@ -523,6 +530,7 @@ class TestModeDispatcher:
                 verbose=False,
                 allow_remote_access=False,
                 stateless_http=False,
+                api_key=None,
             )
 
 
@@ -636,6 +644,8 @@ class TestCLIIntegration:
                     "/test/graphql",
                     "--verbose",
                     "--allow-remote-access",
+                    "--api-key",
+                    "test-api-key",
                 ],
             )
 
@@ -810,7 +820,16 @@ class TestSecurityValidation:
             mock_app.http_app.return_value = Mock()
 
             result = runner.invoke(
-                main, ["--mode", "sse", "--host", "0.0.0.0", "--allow-remote-access"]
+                main,
+                [
+                    "--mode",
+                    "sse",
+                    "--host",
+                    "0.0.0.0",
+                    "--allow-remote-access",
+                    "--api-key",
+                    "test-api-key",
+                ],
             )
 
             # Should succeed with flag
@@ -833,14 +852,22 @@ class TestSecurityValidation:
             mock_app.http_app.return_value = Mock()
 
             result = runner.invoke(
-                main, ["--mode", "sse", "--host", "0.0.0.0", "--allow-remote-access"]
+                main,
+                [
+                    "--mode",
+                    "sse",
+                    "--host",
+                    "0.0.0.0",
+                    "--allow-remote-access",
+                    "--api-key",
+                    "test-api-key",
+                ],
             )
 
             # Check that warning banner is displayed
             assert "WARNING: RUNNING IN REMOTE ACCESS MODE" in result.stderr
-            assert "SECURITY RISKS:" in result.stderr
-            assert "unauthenticated HTTP/SSE interface" in result.stderr
-            assert "Data exfiltration is possible" in result.stderr
+            assert "Bearer API key authentication is enforced" in result.stderr
+            assert "test-api-key" not in result.stderr
             assert "RECOMMENDED PROTECTIONS:" in result.stderr
             assert result.exit_code == 0
 
@@ -966,3 +993,129 @@ class TestIsLoopbackHost:
 
         assert _is_loopback_host("example.com") is False
         assert _is_loopback_host("not-a-real-host") is False
+
+
+class TestApiKeyAuthentication:
+    """Tests for MCP_API_KEY / --api-key handling in the CLI."""
+
+    @pytest.fixture()
+    def mocks(self, monkeypatch: pytest.MonkeyPatch) -> tuple[Mock, Mock]:
+        """Mock Settings, the FastMCP app and uvicorn.run; return (mock_app, mock_uvicorn_run)."""
+        from purple_mcp import server
+
+        monkeypatch.delenv(API_KEY_ENV, raising=False)
+        mock_settings = Mock(return_value=Mock(graphql_full_url="https://test.test/graphql"))
+        mock_app = Mock()
+        mock_uvicorn_run = Mock()
+        monkeypatch.setattr(cli, Settings.__name__, mock_settings)
+        monkeypatch.setattr(server, "app", mock_app)
+        monkeypatch.setattr(uvicorn, uvicorn.run.__name__, mock_uvicorn_run)
+        return mock_app, mock_uvicorn_run
+
+    @pytest.mark.parametrize("mode", ["sse", "streamable-http"])
+    @pytest.mark.parametrize("extra_args", [[], ["--allow-remote-access"]])
+    def test_non_loopback_without_api_key_refuses_to_start(
+        self, mocks: tuple[Mock, Mock], mode: str, extra_args: list[str]
+    ) -> None:
+        """Binding 0.0.0.0 without a key fails closed, even with --allow-remote-access."""
+        _, mock_uvicorn_run = mocks
+        runner = CliRunner(mix_stderr=False)
+
+        result = runner.invoke(main, ["--mode", mode, "--host", "0.0.0.0", *extra_args])
+
+        assert result.exit_code == 1
+        assert "SECURITY ERROR" in result.stderr
+        assert API_KEY_ENV in result.stderr
+        mock_uvicorn_run.assert_not_called()
+
+    def test_non_loopback_with_api_key_but_no_flag_refuses_to_start(
+        self, mocks: tuple[Mock, Mock]
+    ) -> None:
+        """--allow-remote-access is still required for non-loopback binding."""
+        _, mock_uvicorn_run = mocks
+        runner = CliRunner(mix_stderr=False)
+
+        result = runner.invoke(
+            main, ["--mode", "streamable-http", "--host", "0.0.0.0", "--api-key", "secret-key"]
+        )
+
+        assert result.exit_code == 1
+        assert "--allow-remote-access" in result.stderr
+        assert "secret-key" not in result.stderr
+        mock_uvicorn_run.assert_not_called()
+
+    @pytest.mark.parametrize("stateless", [False, True])
+    def test_env_api_key_wraps_http_app_in_bearer_auth(
+        self, mocks: tuple[Mock, Mock], monkeypatch: pytest.MonkeyPatch, stateless: bool
+    ) -> None:
+        """MCP_API_KEY (unprefixed) enables auth on non-loopback, stateful or stateless."""
+        mock_app, mock_uvicorn_run = mocks
+        monkeypatch.setenv(API_KEY_ENV, "env-secret-key")
+        runner = CliRunner(mix_stderr=False)
+        args = ["--mode", "streamable-http", "--host", "0.0.0.0", "--allow-remote-access"]
+
+        result = runner.invoke(main, [*args, *(["--stateless-http"] if stateless else [])])
+
+        assert result.exit_code == 0, result.stderr
+        mock_app.http_app.assert_called_once_with(
+            transport="streamable-http", stateless_http=stateless
+        )
+        served_app = mock_uvicorn_run.call_args.args[0]
+        assert isinstance(served_app, BearerAuth)
+        assert served_app.app is mock_app.http_app.return_value
+        assert "Bearer API key authentication is enforced" in result.stderr
+        assert "env-secret-key" not in result.stderr
+        assert "env-secret-key" not in result.stdout
+
+    def test_api_key_is_registered_for_log_redaction(
+        self, mocks: tuple[Mock, Mock], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The key is registered with the logging secret filter."""
+        mock_register_secret = Mock()
+        monkeypatch.setattr(
+            logging_security, logging_security.register_secret.__name__, mock_register_secret
+        )
+        runner = CliRunner(mix_stderr=False)
+
+        result = runner.invoke(
+            main, ["--mode", "streamable-http", "--host", "localhost", "--api-key", " cli-key "]
+        )
+
+        assert result.exit_code == 0, result.stderr
+        mock_register_secret.assert_called_once_with("cli-key")
+
+    @pytest.mark.parametrize("api_key_args", [[], ["--api-key", "   "]], ids=["unset", "blank"])
+    def test_loopback_without_api_key_serves_unwrapped_app_and_warns(
+        self,
+        mocks: tuple[Mock, Mock],
+        caplog: pytest.LogCaptureFixture,
+        api_key_args: list[str],
+    ) -> None:
+        """On loopback with no (or a blank) key, today's behaviour is kept and a warning logged."""
+        mock_app, mock_uvicorn_run = mocks
+        runner = CliRunner(mix_stderr=False)
+
+        with caplog.at_level("WARNING", logger=cli.__name__):
+            result = runner.invoke(
+                main, ["--mode", "streamable-http", "--host", "127.0.0.1", *api_key_args]
+            )
+
+        assert result.exit_code == 0, result.stderr
+        assert mock_uvicorn_run.call_args.args[0] is mock_app.http_app.return_value
+        assert f"{API_KEY_ENV} is not set" in caplog.text
+
+    def test_stdio_mode_unaffected_by_api_key(
+        self, mocks: tuple[Mock, Mock], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stdio ignores MCP_API_KEY and the host: it runs exactly as before."""
+        mock_app, mock_uvicorn_run = mocks
+        monkeypatch.setenv(API_KEY_ENV, "env-secret-key")
+        runner = CliRunner(mix_stderr=False)
+
+        result = runner.invoke(main, ["--mode", "stdio", "--host", "0.0.0.0"])
+
+        assert result.exit_code == 0, result.stderr
+        mock_app.run.assert_called_once_with(transport="stdio", show_banner=False)
+        mock_app.http_app.assert_not_called()
+        mock_uvicorn_run.assert_not_called()
+        assert "SECURITY ERROR" not in result.stderr
