@@ -16,9 +16,11 @@ import purple_mcp.tools.response as response_tools
 from purple_mcp.tools.response import (
     MAX_TARGETS,
     RESPONSE_TOOL_NAMES,
+    abort_agent_scan,
     disconnect_agents_from_network,
     initiate_agent_scan,
     mitigate_threats,
+    reconnect_agents_to_network,
     register_response_tools,
     update_threat_triage,
 )
@@ -276,7 +278,9 @@ async def _preview_all() -> dict[str, dict[str, Any]]:
     respx.get(f"{API}/threats").mock(return_value=_threats(THREAT))
     previews = [
         await _preview(disconnect_agents_from_network, agent_ids=[AGENT], reason=REASON),
+        await _preview(reconnect_agents_to_network, agent_ids=[AGENT], reason=REASON),
         await _preview(initiate_agent_scan, agent_ids=[AGENT], reason=REASON),
+        await _preview(abort_agent_scan, agent_ids=[AGENT], reason=REASON),
         await _preview(mitigate_threats, threat_ids=[THREAT], action="kill", reason=REASON),
         await _preview(
             update_threat_triage,
@@ -413,6 +417,8 @@ async def test_register_response_tools_with_annotations() -> None:
         assert tool.annotations.readOnlyHint is False
     assert tools["disconnect_agents_from_network"].annotations.destructiveHint is True
     assert tools["mitigate_threats"].annotations.destructiveHint is True
+    assert tools["reconnect_agents_to_network"].annotations.destructiveHint is True
+    assert tools["abort_agent_scan"].annotations.destructiveHint is False
     schema = tools["disconnect_agents_from_network"].inputSchema
     assert schema["properties"]["agent_ids"]["maxItems"] == MAX_TARGETS
     assert set(schema["required"]) == {"agent_ids", "reason"}
@@ -517,3 +523,86 @@ async def test_confirmation_errors_keep_human_wording_by_default() -> None:
         await initiate_agent_scan(
             agent_ids=[AGENT], reason=REASON, confirm=True, confirmation_token="bad.token"
         )
+
+
+# --------------------------------------------------------------------------- reconnect and abort scan
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_fn", "path", "result_key", "body"),
+    [
+        (
+            reconnect_agents_to_network,
+            "/agents/actions/connect",
+            "reconnected",
+            {"filter": {"ids": [AGENT]}},
+        ),
+        (
+            abort_agent_scan,
+            "/agents/actions/abort-scan",
+            "scans_aborted",
+            {"filter": {"ids": [AGENT]}, "data": {}},
+        ),
+    ],
+)
+@respx.mock
+async def test_reconnect_and_abort_scan_preview_then_confirm(
+    tool_fn: Any, path: str, result_key: str, body: dict[str, Any]
+) -> None:
+    """Reconnect and abort-scan follow the same preview-then-confirm flow as the other actions."""
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    action = respx.post(f"{API}{path}").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    preview = await _preview(tool_fn, agent_ids=[AGENT], reason=REASON)
+    assert not action.called
+    assert preview["approval"] == "human"
+    assert preview["targets"][0]["networkStatus"] == "connected"
+
+    done = json.loads(
+        await tool_fn(
+            agent_ids=[AGENT],
+            reason=REASON,
+            confirm=True,
+            confirmation_token=preview["confirmation_token"],
+        )
+    )
+    assert done["affected"] == {result_key: 1}
+    assert json.loads(action.calls.last.request.content) == body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_token_cannot_confirm_reconnect() -> None:
+    """A disconnect preview's token cannot be used to reconnect the same agent."""
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    connect = respx.post(f"{API}/agents/actions/connect")
+    token = (await _preview(disconnect_agents_from_network, agent_ids=[AGENT], reason=REASON))[
+        "confirmation_token"
+    ]
+    with pytest.raises(ToolError, match="doesn't match"):
+        await reconnect_agents_to_network(
+            agent_ids=[AGENT], reason=REASON, confirm=True, confirmation_token=token
+        )
+    assert not connect.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_reconnect_and_abort_follow_agent_confirmable_setting(
+    writes_enabled: SimpleNamespace,
+) -> None:
+    """Reconnect asks for a human unless listed; abort-scan gets agent wording when listed."""
+    writes_enabled.agent_confirmable_actions = ("abort_agent_scan",)
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    reconnect = await _preview(reconnect_agents_to_network, agent_ids=[AGENT], reason=REASON)
+    abort = await _preview(abort_agent_scan, agent_ids=[AGENT], reason=REASON)
+    assert (reconnect["approval"], reconnect["next"]) == ("human", HUMAN_NEXT)
+    assert (abort["approval"], abort["next"]) == ("agent_policy", AGENT_NEXT)
+
+    tools = await _listed_tools(("abort_agent_scan",))
+    assert "no human approval is" in (tools["abort_agent_scan"].description or "")
+    assert "Show that preview to the user" in (
+        tools["reconnect_agents_to_network"].description or ""
+    )

@@ -127,12 +127,31 @@ _DISCONNECT_AGENTS_BASE: Final[str] = dedent(
 Disconnect SentinelOne agents from the network (network quarantine / isolation).
 
 The endpoints lose all network access except to the SentinelOne management console, so
-analysts can keep investigating and reconnect them later from the console. Use this to
-contain a host where an active threat is suspected.
+analysts can keep investigating and reconnect them later (reconnect_agents_to_network or the
+console). Use this to contain a host where an active threat is suspected.
 
 Args:
     agent_ids: 1-{MAX_TARGETS} agent IDs (the numeric agent ID, not the UUID).
     reason: Why the hosts must be isolated.
+    confirm: false to preview, true to perform.
+    confirmation_token: Token from the preview.
+
+Returns:
+    JSON. Preview: target agents (name, site, current network status) and a
+    confirmation_token. Confirmed: the number of agents affected.
+"""
+).strip()
+
+_RECONNECT_AGENTS_BASE: Final[str] = dedent(
+    f"""
+Reconnect network-isolated SentinelOne agents (undo disconnect_agents_from_network).
+
+The endpoints get their normal network access back. Only do this once the threat on each host
+is contained or ruled out: a host that is still compromised can spread again.
+
+Args:
+    agent_ids: 1-{MAX_TARGETS} agent IDs (the numeric agent ID, not the UUID).
+    reason: Why the hosts are safe to reconnect.
     confirm: false to preview, true to perform.
     confirmation_token: Token from the preview.
 
@@ -149,6 +168,22 @@ Start a full disk scan on SentinelOne agents.
 Args:
     agent_ids: 1-{MAX_TARGETS} agent IDs (the numeric agent ID, not the UUID).
     reason: Why the scan is needed.
+    confirm: false to preview, true to perform.
+    confirmation_token: Token from the preview.
+
+Returns:
+    JSON. Preview: target agents and a confirmation_token. Confirmed: the number of agents
+    affected.
+"""
+).strip()
+
+_ABORT_SCAN_BASE: Final[str] = dedent(
+    f"""
+Abort a running full disk scan on SentinelOne agents (undo initiate_agent_scan).
+
+Args:
+    agent_ids: 1-{MAX_TARGETS} agent IDs (the numeric agent ID, not the UUID).
+    reason: Why the scan should stop.
     confirm: false to preview, true to perform.
     confirmation_token: Token from the preview.
 
@@ -210,7 +245,9 @@ def _description(base: str, agent_may_confirm: bool) -> str:
 
 # Default (human-approval) descriptions.
 DISCONNECT_AGENTS_DESCRIPTION: Final[str] = _description(_DISCONNECT_AGENTS_BASE, False)
+RECONNECT_AGENTS_DESCRIPTION: Final[str] = _description(_RECONNECT_AGENTS_BASE, False)
 INITIATE_SCAN_DESCRIPTION: Final[str] = _description(_INITIATE_SCAN_BASE, False)
+ABORT_SCAN_DESCRIPTION: Final[str] = _description(_ABORT_SCAN_BASE, False)
 MITIGATE_THREATS_DESCRIPTION: Final[str] = _description(_MITIGATE_THREATS_BASE, False)
 UPDATE_THREAT_TRIAGE_DESCRIPTION: Final[str] = _description(_UPDATE_THREAT_TRIAGE_BASE, False)
 
@@ -433,6 +470,34 @@ async def disconnect_agents_from_network(
     )
 
 
+async def reconnect_agents_to_network(
+    agent_ids: _Ids,
+    reason: _Reason,
+    confirm: _Confirm = False,
+    confirmation_token: _Token = None,
+) -> str:
+    """Reconnect network-isolated agents (two-step: preview, then confirm)."""
+    ids = _normalise_ids(agent_ids, "agent")
+    params = {"agent_ids": ids, "reason": _normalise_reason(reason)}
+
+    async def preview(client: ResponseClient) -> list[dict[str, Any]]:
+        agents = await client.get_agents(ids)
+        _require_all_found(ids, agents, "Agent")
+        return [_agent_summary(a) for a in agents]
+
+    async def execute(client: ResponseClient) -> dict[str, int]:
+        return {"reconnected": await client.reconnect_agents(ids)}
+
+    return await _two_step(
+        action="reconnect_agents_to_network",
+        params=params,
+        preview=preview,
+        execute=execute,
+        confirm=confirm,
+        confirmation_token=confirmation_token,
+    )
+
+
 async def initiate_agent_scan(
     agent_ids: _Ids,
     reason: _Reason,
@@ -453,6 +518,34 @@ async def initiate_agent_scan(
 
     return await _two_step(
         action="initiate_agent_scan",
+        params=params,
+        preview=preview,
+        execute=execute,
+        confirm=confirm,
+        confirmation_token=confirmation_token,
+    )
+
+
+async def abort_agent_scan(
+    agent_ids: _Ids,
+    reason: _Reason,
+    confirm: _Confirm = False,
+    confirmation_token: _Token = None,
+) -> str:
+    """Abort a running full disk scan on agents (two-step: preview, then confirm)."""
+    ids = _normalise_ids(agent_ids, "agent")
+    params = {"agent_ids": ids, "reason": _normalise_reason(reason)}
+
+    async def preview(client: ResponseClient) -> list[dict[str, Any]]:
+        agents = await client.get_agents(ids)
+        _require_all_found(ids, agents, "Agent")
+        return [_agent_summary(a) for a in agents]
+
+    async def execute(client: ResponseClient) -> dict[str, int]:
+        return {"scans_aborted": await client.abort_scan(ids)}
+
+    return await _two_step(
+        action="abort_agent_scan",
         params=params,
         preview=preview,
         execute=execute,
@@ -558,7 +651,9 @@ def register_response_tools(
     confirmable = frozenset(agent_confirmable)
     tools: tuple[tuple[Callable[..., Awaitable[str]], str, ToolAnnotations], ...] = (
         (disconnect_agents_from_network, _DISCONNECT_AGENTS_BASE, _DESTRUCTIVE),
+        (reconnect_agents_to_network, _RECONNECT_AGENTS_BASE, _DESTRUCTIVE),
         (initiate_agent_scan, _INITIATE_SCAN_BASE, _WRITE),
+        (abort_agent_scan, _ABORT_SCAN_BASE, _WRITE),
         (mitigate_threats, _MITIGATE_THREATS_BASE, _DESTRUCTIVE),
         (update_threat_triage, _UPDATE_THREAT_TRIAGE_BASE, _WRITE),
     )

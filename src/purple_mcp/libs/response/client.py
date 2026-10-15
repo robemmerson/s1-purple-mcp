@@ -139,9 +139,17 @@ class ResponseClient:
         """Network-isolate agents. Returns the number of agents affected."""
         return await self._post_action("/agents/actions/disconnect", agent_ids)
 
+    async def reconnect_agents(self, agent_ids: Sequence[str]) -> int:
+        """Reconnect network-isolated agents. Returns the number of agents affected."""
+        return await self._post_action("/agents/actions/connect", agent_ids)
+
     async def initiate_scan(self, agent_ids: Sequence[str]) -> int:
         """Start a full disk scan on agents. Returns the number of agents affected."""
         return await self._post_action("/agents/actions/initiate-scan", agent_ids, data={})
+
+    async def abort_scan(self, agent_ids: Sequence[str]) -> int:
+        """Abort a running full disk scan on agents. Returns the number of agents affected."""
+        return await self._post_action("/agents/actions/abort-scan", agent_ids, data={})
 
     async def mitigate_threats(self, threat_ids: Sequence[str], action: str) -> int:
         """Apply a mitigation action to threats. Returns the number of threats affected."""

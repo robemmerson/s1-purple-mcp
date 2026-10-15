@@ -70,7 +70,9 @@ AGENT_CONFIRMABLE_ACTIONS_ENV: Final[str] = f"{ENV_PREFIX}AGENT_CONFIRMABLE_ACTI
 # Names of the opt-in response-action tools (purple_mcp.tools.response).
 RESPONSE_ACTION_NAMES: Final[tuple[str, ...]] = (
     "disconnect_agents_from_network",
+    "reconnect_agents_to_network",
     "initiate_agent_scan",
+    "abort_agent_scan",
     "mitigate_threats",
     "update_threat_triage",
 )
