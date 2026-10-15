@@ -28,7 +28,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from purple_mcp.config import get_settings
+from purple_mcp.config import RESPONSE_ACTION_NAMES, get_settings
 from purple_mcp.libs.response import ResponseClient
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,19 @@ _Token = Annotated[
     str | None,
     Field(description="The confirmation_token returned by the preview of this exact action"),
 ]
+
+# Guidance returned with each preview. PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS only chooses which text
+# is shown; confirming still needs the token from a matching preview either way.
+_HUMAN_APPROVAL_NEXT: Final = (
+    "Show this preview to the user. Only after they explicitly approve it, call "
+    "again with the same arguments, confirm=true and this confirmation_token."
+)
+_AGENT_POLICY_NEXT: Final = (
+    "Check that every target (hostnames, sites, statuses) matches what you intended. If it "
+    "does and your operating policy authorises this action, call again with the same "
+    "arguments, confirm=true and this confirmation_token. If anything is unexpected, don't "
+    "confirm: escalate to a human."
+)
 
 _CONFIRM_KEY: Final = secrets.token_bytes(32)
 _spent: dict[str, float] = {}  # nonce -> when it can be forgotten; each token confirms one action
@@ -341,6 +354,7 @@ async def _two_step(
 
     async with _response_client() as client:
         targets_found = await preview(client)
+    agent_may_confirm = action in get_settings().agent_confirmable_actions
     return json.dumps(
         {
             "sent": False,
@@ -348,10 +362,8 @@ async def _two_step(
             "arguments": params,
             "targets": targets_found,
             "confirmation_token": _confirmation_token(action, params),
-            "next": (
-                "Show this preview to the user. Only after they explicitly approve it, call "
-                "again with the same arguments, confirm=true and this confirmation_token."
-            ),
+            "approval": "agent_policy" if agent_may_confirm else "human",
+            "next": _AGENT_POLICY_NEXT if agent_may_confirm else _HUMAN_APPROVAL_NEXT,
         },
         indent=2,
     )
@@ -493,12 +505,7 @@ async def update_threat_triage(
     )
 
 
-RESPONSE_TOOL_NAMES: Final[tuple[str, ...]] = (
-    "disconnect_agents_from_network",
-    "initiate_agent_scan",
-    "mitigate_threats",
-    "update_threat_triage",
-)
+RESPONSE_TOOL_NAMES: Final[tuple[str, ...]] = RESPONSE_ACTION_NAMES
 
 
 def register_response_tools(app: fastmcp.FastMCP[None]) -> None:

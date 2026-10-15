@@ -348,6 +348,25 @@ sit behind the same `MCP_API_KEY` bearer authentication as everything else.
 Create the response token for a dedicated Service User whose role allows only these actions, and
 scope it to the Account or Site the agent should be able to touch.
 
+#### Who approves: `PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS`
+
+Each preview carries an `approval` field and a `next` instruction for the calling agent:
+
+- By default every action gets `"approval": "human"`, and `next` tells the agent to show the
+  preview to the user and confirm only after they approve it.
+- For actions named in `PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS` (comma-separated tool names, for
+  example `initiate_agent_scan,disconnect_agents_from_network`), the preview says
+  `"approval": "agent_policy"`. Its `next` tells the agent to check the targets and confirm itself if
+  its operating policy authorises the action, or escalate to a human if anything is unexpected.
+
+Use this for deployments where an autonomous agent, with no human present, is authorised to run
+those actions. It **changes guidance text only**. Every action still needs a preview and the
+single-use token from it, with identical arguments, and every other safeguard above still applies.
+The server cannot tell whether a human approved anything, so real approval for risky actions must
+be enforced by the calling platform (for example Microsoft Foundry's MCP tool approval setting).
+Unknown names stop the server from starting; the setting is ignored, with a warning, unless
+`PURPLEMCP_ALLOW_WRITES=true`.
+
 ## Environment Variables
 
 ### Required
@@ -388,6 +407,10 @@ scope it to the Account or Site the agent should be able to touch.
   (default: `false`). Requires `PURPLEMCP_RESPONSE_TOKEN`.
 - `PURPLEMCP_RESPONSE_TOKEN` - API token used only by the response-action tools. Must differ from
   `PURPLEMCP_CONSOLE_TOKEN`; redacted from logs like the other tokens.
+- `PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS` - Comma-separated response-action tool names whose previews
+  tell the agent it may confirm them under its own policy (default: empty, so every preview asks
+  for human approval). Changes guidance text only; see
+  [Who approves](#who-approves-purplemcp_agent_confirmable_actions).
 - `PURPLEMCP_STATELESS_HTTP` - Enable stateless HTTP mode for serverless deployments (e.g., Amazon
   Bedrock AgentCore) - see [deployment guide](deploy/aws_agentcore/BEDROCK_AGENTCORE_DEPLOYMENT.md)
 

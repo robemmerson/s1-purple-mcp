@@ -19,6 +19,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PURPLEMCP_ALLOW_WRITES=true`, authenticated with a separate `PURPLEMCP_RESPONSE_TOKEN`, limited
   to 10 explicit IDs per call, and each change needs a preview followed by a single-use, signed
   confirmation token.
+- `PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS`: comma-separated response actions whose previews tell an
+  autonomous agent it may confirm them under its own policy (`"approval": "agent_policy"`). Every
+  other preview now carries `"approval": "human"` with the existing guidance. Guidance only; the
+  preview and confirmation token are still required.
 
 ### Changed
 

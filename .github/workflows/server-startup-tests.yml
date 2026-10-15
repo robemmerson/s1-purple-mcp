@@ -51,8 +51,8 @@ jobs:
             exit 1
           fi
         env:
-          PURPLEMCP_CONSOLE_TOKEN: ${{ secrets.CONSOLE_TOKEN }}
-          PURPLEMCP_CONSOLE_BASE_URL: ${{ secrets.CONSOLE_BASE_URL }}
+          PURPLEMCP_CONSOLE_TOKEN: ${{ secrets.CONSOLE_TOKEN || 'ci-dummy-console-token' }}
+          PURPLEMCP_CONSOLE_BASE_URL: ${{ secrets.CONSOLE_BASE_URL || 'https://console.example.test' }}
 
       - name: Test SSE mode
         run: |
@@ -80,8 +80,8 @@ jobs:
             exit 1
           fi
         env:
-          PURPLEMCP_CONSOLE_TOKEN: ${{ secrets.CONSOLE_TOKEN }}
-          PURPLEMCP_CONSOLE_BASE_URL: ${{ secrets.CONSOLE_BASE_URL }}
+          PURPLEMCP_CONSOLE_TOKEN: ${{ secrets.CONSOLE_TOKEN || 'ci-dummy-console-token' }}
+          PURPLEMCP_CONSOLE_BASE_URL: ${{ secrets.CONSOLE_BASE_URL || 'https://console.example.test' }}
 
       - name: Test streamable-http mode
         run: |
@@ -109,5 +109,5 @@ jobs:
             exit 1
           fi
         env:
-          PURPLEMCP_CONSOLE_TOKEN: ${{ secrets.CONSOLE_TOKEN }}
-          PURPLEMCP_CONSOLE_BASE_URL: ${{ secrets.CONSOLE_BASE_URL }}
+          PURPLEMCP_CONSOLE_TOKEN: ${{ secrets.CONSOLE_TOKEN || 'ci-dummy-console-token' }}
+          PURPLEMCP_CONSOLE_BASE_URL: ${{ secrets.CONSOLE_BASE_URL || 'https://console.example.test' }}

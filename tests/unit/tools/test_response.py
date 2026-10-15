@@ -35,7 +35,10 @@ REASON = "ransomware behaviour on host"
 def writes_enabled(monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]:
     """Point the tools at stub settings with writes enabled and a fresh token store."""
     settings = SimpleNamespace(
-        allow_writes=True, response_token="write-token", sentinelone_console_base_url=BASE
+        allow_writes=True,
+        response_token="write-token",
+        sentinelone_console_base_url=BASE,
+        agent_confirmable_actions=(),
     )
     monkeypatch.setattr(response_tools, "get_settings", lambda: settings)
     response_tools._spent.clear()
@@ -248,6 +251,101 @@ async def test_triage_sets_both_fields() -> None:
     done = json.loads(await update_threat_triage(**kwargs, confirm=True, confirmation_token=token))
     assert done["affected"] == {"analyst_verdict": 1, "incident_status": 1}
     assert verdict.called and status.called
+
+
+# --------------------------------------------------------------------------- approval guidance
+
+# The preview guidance shipped before PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS existed. It must stay
+# verbatim for every action that is not configured as agent-confirmable.
+HUMAN_NEXT = (
+    "Show this preview to the user. Only after they explicitly approve it, call again with the "
+    "same arguments, confirm=true and this confirmation_token."
+)
+AGENT_NEXT = (
+    "Check that every target (hostnames, sites, statuses) matches what you intended. If it "
+    "does and your operating policy authorises this action, call again with the same "
+    "arguments, confirm=true and this confirmation_token. If anything is unexpected, don't "
+    "confirm: escalate to a human."
+)
+AGENT_CONFIRMABLE = ("initiate_agent_scan", "disconnect_agents_from_network")
+
+
+async def _preview_all() -> dict[str, dict[str, Any]]:
+    """Preview each of the four response actions and return the previews by action name."""
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    respx.get(f"{API}/threats").mock(return_value=_threats(THREAT))
+    previews = [
+        await _preview(disconnect_agents_from_network, agent_ids=[AGENT], reason=REASON),
+        await _preview(initiate_agent_scan, agent_ids=[AGENT], reason=REASON),
+        await _preview(mitigate_threats, threat_ids=[THREAT], action="kill", reason=REASON),
+        await _preview(
+            update_threat_triage,
+            threat_ids=[THREAT],
+            reason=REASON,
+            incident_status="in_progress",
+        ),
+    ]
+    return {p["action"]: p for p in previews}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_previews_default_to_human_approval_with_unchanged_text() -> None:
+    """With the setting unset, every preview asks for human approval in the original words."""
+    previews = await _preview_all()
+    assert set(previews) == set(RESPONSE_TOOL_NAMES)
+    for preview in previews.values():
+        assert preview["approval"] == "human"
+        assert preview["next"] == HUMAN_NEXT
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_configured_actions_get_agent_policy_guidance(
+    writes_enabled: SimpleNamespace,
+) -> None:
+    """Only the configured actions tell the agent it may confirm under its own policy."""
+    writes_enabled.agent_confirmable_actions = AGENT_CONFIRMABLE
+    previews = await _preview_all()
+    for name, preview in previews.items():
+        if name in AGENT_CONFIRMABLE:
+            assert preview["approval"] == "agent_policy"
+            assert preview["next"] == AGENT_NEXT
+        else:
+            assert preview["approval"] == "human"
+            assert preview["next"] == HUMAN_NEXT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmable", [(), AGENT_CONFIRMABLE])
+@respx.mock
+async def test_confirmation_token_still_required_in_every_mode(
+    writes_enabled: SimpleNamespace, confirmable: tuple[str, ...]
+) -> None:
+    """Agent-confirmable actions still need a matching, unused token from a preview."""
+    writes_enabled.agent_confirmable_actions = confirmable
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT, AGENT2))
+    action = respx.post(f"{API}/agents/actions/disconnect").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+
+    with pytest.raises(ToolError, match="needs the confirmation_token"):
+        await disconnect_agents_from_network(agent_ids=[AGENT], reason=REASON, confirm=True)
+
+    token = (await _preview(disconnect_agents_from_network, agent_ids=[AGENT], reason=REASON))[
+        "confirmation_token"
+    ]
+    with pytest.raises(ToolError, match="doesn't match"):
+        await disconnect_agents_from_network(
+            agent_ids=[AGENT2], reason=REASON, confirm=True, confirmation_token=token
+        )
+    assert not action.called
+
+    kwargs = {"agent_ids": [AGENT], "reason": REASON, "confirm": True, "confirmation_token": token}
+    await disconnect_agents_from_network(**kwargs)
+    with pytest.raises(ToolError, match="already used"):
+        await disconnect_agents_from_network(**kwargs)
+    assert action.call_count == 1
 
 
 # --------------------------------------------------------------------------- input validation
