@@ -379,6 +379,33 @@ guidance, so to keep an agent from reconnecting at all, leave the tool out of it
 the calling platform, or leave the SentinelOne role's **Reconnect To Network** permission off the
 response token.
 
+#### Isolation cap: `PURPLEMCP_MAX_ISOLATED_AGENTS`
+
+`disconnect_agents_from_network` refuses any action that would leave more than
+`PURPLEMCP_MAX_ISOLATED_AGENTS` agents (default **30**) network-isolated at once. The count
+includes every isolated agent, however it was isolated: from the console, by another tool or
+policy, or by this server.
+
+- Both the preview and the confirmation count the agents whose `networkStatus` is `disconnected`,
+  `disconnecting` or `connecting` (a reconnect still in progress), then add the targets that
+  aren't already among them. If the total would go over the cap, the call is refused, nothing is
+  sent, and the preview returns no confirmation token. Agents already isolated aren't counted
+  twice, and reaching the cap exactly is allowed.
+- Previews and results include `isolation_cap` (`limit`, `isolated_now`, `isolated_after`).
+- Agents this server sent a disconnect for count as isolated for 15 minutes, whatever the console
+  reports, in case it hasn't caught up yet. That includes a disconnect that failed or timed out.
+- Confirmations are serialised, so two agents racing for the last slot can't both get it.
+- If the count can't be read (an API error, or a response without a total), the disconnect is
+  refused.
+- `0` blocks network isolation entirely. Reconnecting, scans and threat actions are never
+  limited by the cap.
+
+The count covers only the agents the **response token** can see, so scope that token to the
+Account (or Global) rather than a Site if the cap must cover the whole estate. The cap is
+enforced per server process, so run one replica. The server can't stop people or other
+integrations isolating hosts directly in the console. It counts their isolations, but one made in
+the instant between the server's check and its disconnect isn't seen until the next check.
+
 ## Environment Variables
 
 ### Required
@@ -423,6 +450,10 @@ response token.
   tell the agent it may confirm them under its own policy (default: empty, so every preview asks
   for human approval). Changes guidance text only; see
   [Who approves](#who-approves-purplemcp_agent_confirmable_actions).
+- `PURPLEMCP_MAX_ISOLATED_AGENTS` - Most agents that may be network-isolated at once, counting
+  every isolated agent the response token can see (default: `30`; `0` blocks isolation).
+  `disconnect_agents_from_network` refuses anything that would exceed it; see
+  [Isolation cap](#isolation-cap-purplemcp_max_isolated_agents).
 - `PURPLEMCP_STATELESS_HTTP` - Enable stateless HTTP mode for serverless deployments (e.g., Amazon
   Bedrock AgentCore) - see [deployment guide](deploy/aws_agentcore/BEDROCK_AGENTCORE_DEPLOYMENT.md)
 

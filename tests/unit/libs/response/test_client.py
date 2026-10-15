@@ -178,3 +178,56 @@ async def test_reconnect_and_abort_scan_endpoints() -> None:
         "filter": {"ids": AGENT_IDS[:1]},
         "data": {},
     }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_isolated_agents_queries_every_non_connected_status() -> None:
+    """The isolated count asks for every status other than connected and returns the total."""
+    route = respx.get(f"{API}/agents").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [{"id": AGENT_IDS[0]}, {"id": AGENT_IDS[1]}, {"computerName": "no-id"}],
+                "pagination": {"totalItems": 3},
+            },
+        )
+    )
+    async with _client() as client:
+        ids, total = await client.get_isolated_agents()
+    assert ids == set(AGENT_IDS)
+    assert total == 3
+    params = route.calls.last.request.url.params
+    assert params["networkStatuses"] == "connecting,disconnected,disconnecting"
+    assert params["limit"] == "1000"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_isolated_agents_never_reports_fewer_than_listed() -> None:
+    """A total lower than the entries returned is raised to the number of entries."""
+    respx.get(f"{API}/agents").mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"id": i} for i in AGENT_IDS], "pagination": {"totalItems": 0}}
+        )
+    )
+    async with _client() as client:
+        assert await client.get_isolated_agents() == (set(AGENT_IDS), 2)
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"data": []},
+        {"data": None, "pagination": {"totalItems": 0}},
+        {"data": [], "pagination": {"totalItems": True}},
+    ],
+)
+async def test_get_isolated_agents_rejects_unusable_counts(body: dict[str, object]) -> None:
+    """A response without a list and an integer total is an error, not zero."""
+    respx.get(f"{API}/agents").mock(return_value=httpx.Response(200, json=body))
+    async with _client() as client:
+        with pytest.raises(ResponseAPIError, match="no count of isolated agents"):
+            await client.get_isolated_agents()

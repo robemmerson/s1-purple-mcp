@@ -1,5 +1,6 @@
 """Tests for the opt-in response-action tools."""
 
+import asyncio
 import json
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 import purple_mcp.tools.response as response_tools
+from purple_mcp.libs.response import ResponseAPIError, ResponseNetworkError
 from purple_mcp.tools.response import (
     MAX_TARGETS,
     RESPONSE_TOOL_NAMES,
@@ -41,11 +43,14 @@ def writes_enabled(monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]
         response_token="write-token",
         sentinelone_console_base_url=BASE,
         agent_confirmable_actions=(),
+        max_isolated_agents=30,
     )
     monkeypatch.setattr(response_tools, "get_settings", lambda: settings)
     response_tools._spent.clear()
+    response_tools._isolated_here.clear()
     yield settings
     response_tools._spent.clear()
+    response_tools._isolated_here.clear()
 
 
 def _agents(*ids: str) -> httpx.Response:
@@ -55,7 +60,8 @@ def _agents(*ids: str) -> httpx.Response:
             "data": [
                 {"id": i, "computerName": f"host-{i[-1]}", "networkStatus": "connected"}
                 for i in ids
-            ]
+            ],
+            "pagination": {"totalItems": len(ids)},
         },
     )
 
@@ -113,6 +119,7 @@ async def test_disconnect_preview_then_confirm() -> None:
         "sent": True,
         "action": "disconnect_agents_from_network",
         "affected": {"disconnected": 2},
+        "isolation_cap": {"limit": 30, "isolated_now": 2, "isolated_after": 2},
     }
     assert json.loads(action.calls.last.request.content) == {"filter": {"ids": [AGENT, AGENT2]}}
 
@@ -606,3 +613,256 @@ async def test_reconnect_and_abort_follow_agent_confirmable_setting(
     assert "Show that preview to the user" in (
         tools["reconnect_agents_to_network"].description or ""
     )
+
+
+# --------------------------------------------------------------------------- isolation cap
+
+ISOLATED_QUERY = {"networkStatuses": "connecting,disconnected,disconnecting"}
+
+
+def _others(count: int) -> list[str]:
+    """Return *count* agent IDs distinct from the test targets."""
+    return [str(500_000_000_000_000_000 + n) for n in range(count)]
+
+
+def _mock_isolated(*batches: list[str], total: int | None = None) -> respx.Route:
+    """Mock the isolated-agents count, one response per call (the last repeats)."""
+    responses = [
+        httpx.Response(
+            200,
+            json={
+                "data": [{"id": i, "networkStatus": "disconnected"} for i in ids],
+                "pagination": {"totalItems": len(ids) if total is None else total},
+            },
+        )
+        for ids in batches
+    ]
+    route = respx.get(f"{API}/agents", params=ISOLATED_QUERY)
+    route.side_effect = [*responses, *[responses[-1]] * 20]
+    return route
+
+
+async def _disconnect(agent_ids: list[str]) -> dict[str, Any]:
+    """Preview and confirm a disconnect, returning the confirmed result."""
+    preview = await _preview(disconnect_agents_from_network, agent_ids=agent_ids, reason=REASON)
+    result: dict[str, Any] = json.loads(
+        await disconnect_agents_from_network(
+            agent_ids=agent_ids,
+            reason=REASON,
+            confirm=True,
+            confirmation_token=preview["confirmation_token"],
+        )
+    )
+    return result
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_refuses_preview_and_issues_no_token() -> None:
+    """With 30 agents already isolated, isolating one more is refused before any token."""
+    isolated = _mock_isolated(_others(30))
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    action = respx.post(f"{API}/agents/actions/disconnect")
+    with pytest.raises(ToolError, match=r"Refused: 30 agent\(s\).*would make 31.*\(30\)"):
+        await disconnect_agents_from_network(agent_ids=[AGENT], reason=REASON)
+    assert isolated.called
+    assert not action.called
+    query = isolated.calls.last.request.url.params
+    assert query["limit"] == "1000"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_allows_reaching_exactly_the_limit() -> None:
+    """29 isolated plus one more makes 30, which is allowed and reported."""
+    _mock_isolated(_others(29))
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    action = respx.post(f"{API}/agents/actions/disconnect").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    done = await _disconnect([AGENT])
+    assert done["isolation_cap"] == {"limit": 30, "isolated_now": 29, "isolated_after": 30}
+    assert action.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_counts_batch_size() -> None:
+    """28 isolated plus a batch of three would make 31: the whole batch is refused."""
+    _mock_isolated(_others(28))
+    third = "333333333333333334"
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT, AGENT2, third))
+    action = respx.post(f"{API}/agents/actions/disconnect")
+    with pytest.raises(ToolError, match="would make 31"):
+        await disconnect_agents_from_network(agent_ids=[AGENT, AGENT2, third], reason=REASON)
+    assert not action.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_does_not_double_count_isolated_targets() -> None:
+    """A target that is already isolated adds nothing to the count."""
+    _mock_isolated([*_others(29), AGENT])
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    respx.post(f"{API}/agents/actions/disconnect").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    done = await _disconnect([AGENT])
+    assert done["isolation_cap"] == {"limit": 30, "isolated_now": 30, "isolated_after": 30}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_rechecked_at_confirmation() -> None:
+    """Hosts isolated elsewhere between preview and confirm are counted; nothing is sent."""
+    _mock_isolated(_others(29), _others(30))
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    action = respx.post(f"{API}/agents/actions/disconnect")
+    preview = await _preview(disconnect_agents_from_network, agent_ids=[AGENT], reason=REASON)
+    assert preview["isolation_cap"]["isolated_after"] == 30
+    with pytest.raises(ToolError, match="would make 31"):
+        await disconnect_agents_from_network(
+            agent_ids=[AGENT],
+            reason=REASON,
+            confirm=True,
+            confirmation_token=preview["confirmation_token"],
+        )
+    assert not action.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_counts_isolated_agents_not_listed_by_id() -> None:
+    """A console total above the listed IDs (more than one page) is counted in full."""
+    _mock_isolated(_others(5), total=1500)
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    with pytest.raises(ToolError, match="Refused: 1500 agent"):
+        await disconnect_agents_from_network(agent_ids=[AGENT], reason=REASON)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_remembers_agents_this_server_isolated(
+    writes_enabled: SimpleNamespace,
+) -> None:
+    """If the console has not caught up, agents this server just isolated still count."""
+    writes_enabled.max_isolated_agents = 1
+    _mock_isolated([])  # the console never reports the first isolation
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT, AGENT2))
+    action = respx.post(f"{API}/agents/actions/disconnect").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    await _disconnect([AGENT])
+    with pytest.raises(ToolError, match=r"Refused: 1 agent\(s\).*would make 2"):
+        await disconnect_agents_from_network(agent_ids=[AGENT2], reason=REASON)
+    assert action.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_counts_a_disconnect_that_failed_in_flight(
+    writes_enabled: SimpleNamespace,
+) -> None:
+    """A disconnect that timed out may have applied, so its targets still count."""
+    writes_enabled.max_isolated_agents = 1
+    _mock_isolated([])
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT, AGENT2))
+    respx.post(f"{API}/agents/actions/disconnect").mock(side_effect=httpx.ReadTimeout("slow"))
+    with pytest.raises(ResponseNetworkError):
+        await _disconnect([AGENT])
+    with pytest.raises(ToolError, match="would make 2"):
+        await disconnect_agents_from_network(agent_ids=[AGENT2], reason=REASON)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_holds_under_concurrent_confirmations(
+    writes_enabled: SimpleNamespace,
+) -> None:
+    """Two confirmations racing for the last slot: exactly one disconnect is sent."""
+    writes_enabled.max_isolated_agents = 1
+
+    async def slow_count(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.01)  # let the other confirmation run its check meanwhile
+        return httpx.Response(200, json={"data": [], "pagination": {"totalItems": 0}})
+
+    respx.get(f"{API}/agents", params=ISOLATED_QUERY).mock(side_effect=slow_count)
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT, AGENT2))
+
+    async def slow_disconnect(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json={"data": {"affected": 1}})
+
+    action = respx.post(f"{API}/agents/actions/disconnect").mock(side_effect=slow_disconnect)
+    tokens = [
+        (await _preview(disconnect_agents_from_network, agent_ids=[a], reason=REASON))[
+            "confirmation_token"
+        ]
+        for a in (AGENT, AGENT2)
+    ]
+    results = await asyncio.gather(
+        *(
+            disconnect_agents_from_network(
+                agent_ids=[a], reason=REASON, confirm=True, confirmation_token=t
+            )
+            for a, t in zip((AGENT, AGENT2), tokens, strict=True)
+        ),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(r, str) for r in results) == 1
+    assert sum(isinstance(r, ToolError) for r in results) == 1
+    assert action.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_of_zero_blocks_all_isolation(
+    writes_enabled: SimpleNamespace,
+) -> None:
+    """PURPLEMCP_MAX_ISOLATED_AGENTS=0 refuses every disconnect."""
+    writes_enabled.max_isolated_agents = 0
+    _mock_isolated([])
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    with pytest.raises(ToolError, match="more than this server allows \\(0\\)"):
+        await disconnect_agents_from_network(agent_ids=[AGENT], reason=REASON)
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(500, json={"errors": [{"title": "boom"}]}),
+        httpx.Response(200, json={"data": []}),  # no pagination total
+        httpx.Response(200, json={"data": [], "pagination": {"totalItems": "7"}}),
+    ],
+)
+async def test_isolation_cap_fails_closed_when_count_unavailable(
+    response: httpx.Response,
+) -> None:
+    """If the isolated count can't be read, the disconnect is refused."""
+    respx.get(f"{API}/agents", params=ISOLATED_QUERY).mock(return_value=response)
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    with pytest.raises(ResponseAPIError):
+        await disconnect_agents_from_network(agent_ids=[AGENT], reason=REASON)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_isolation_cap_does_not_block_reconnect_or_scans() -> None:
+    """Over the cap, reconnecting and scanning still work and never query the isolated count."""
+    isolated = _mock_isolated(_others(40))
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    respx.post(f"{API}/agents/actions/connect").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    for tool in (reconnect_agents_to_network, initiate_agent_scan):
+        preview = await _preview(tool, agent_ids=[AGENT], reason=REASON)
+        assert "isolation_cap" not in preview
+    token = (await _preview(reconnect_agents_to_network, agent_ids=[AGENT], reason=REASON))[
+        "confirmation_token"
+    ]
+    await reconnect_agents_to_network(
+        agent_ids=[AGENT], reason=REASON, confirm=True, confirmation_token=token
+    )
+    assert not isolated.called

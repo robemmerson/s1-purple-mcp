@@ -126,6 +126,11 @@ is not an approval mechanism. Enforce human approval for the riskier actions
 (`reconnect_agents_to_network`, `mitigate_threats`, `update_threat_triage`) in Foundry's MCP tool
 approval settings, and use `allowed_tools` to give each agent only the tools it needs.
 
+`disconnect_agents_from_network` refuses anything that would leave more than 30 agents isolated,
+counting hosts isolated by anyone (`PURPLEMCP_MAX_ISOLATED_AGENTS` changes the limit). Scope the
+response token to the Account so the count covers every site, and run a single replica
+(`--min-replicas 1 --max-replicas 1`), because the cap is enforced per process.
+
 ### Cloud Native Setup
 
 For more detailed cloud setup instructions, see [CLOUD_SETUP.md](cloud/CLOUD_SETUP.md).

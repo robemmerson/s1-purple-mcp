@@ -11,8 +11,12 @@ more tightly than the read tools:
   an HMAC over the exact action and parameters, valid for ``CONFIRM_TTL`` seconds, usable once,
   and tied to this server process.
 - Every executed action is logged with the caller's stated reason.
+- Network isolation is capped: disconnect_agents_from_network refuses anything that would leave
+  more than ``PURPLEMCP_MAX_ISOLATED_AGENTS`` agents isolated, however the others were isolated.
 """
 
+import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -97,6 +101,14 @@ _AGENT_POLICY_NEXT: Final = (
 _CONFIRM_KEY: Final = secrets.token_bytes(32)
 _spent: dict[str, float] = {}  # nonce -> when it can be forgotten; each token confirms one action
 
+# Agents this server sent a disconnect for are counted as isolated for this long whatever the
+# console says, in case it has not caught up yet.
+_ISOLATION_MEMORY: Final = 900  # seconds
+_isolated_here: dict[str, float] = {}  # agent ID -> when to stop counting it
+# Held from the cap check until the disconnect is sent, so two confirmations can't both pass the
+# same check.
+_guard_lock: Final = asyncio.Lock()
+
 _TWO_STEP_NOTE: Final = dedent(
     """
     This is a write action and runs in two steps:
@@ -129,6 +141,10 @@ Disconnect SentinelOne agents from the network (network quarantine / isolation).
 The endpoints lose all network access except to the SentinelOne management console, so
 analysts can keep investigating and reconnect them later (reconnect_agents_to_network or the
 console). Use this to contain a host where an active threat is suspected.
+
+This server caps how many agents may be isolated at once, counting every isolated agent however
+it was isolated. An action that would go over the cap is refused (at preview and again at
+confirmation) and nothing changes; don't retry or split it, escalate to a human.
 
 Args:
     agent_ids: 1-{MAX_TARGETS} agent IDs (the numeric agent ID, not the UUID).
@@ -386,6 +402,45 @@ def _threat_summary(threat: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _isolation_headroom(client: ResponseClient, ids: list[str]) -> dict[str, Any]:
+    """Refuse unless isolating *ids* keeps the number of isolated agents within the cap.
+
+    Counts every agent the console reports as isolated, being isolated or being reconnected,
+    plus agents this server sent a disconnect for in the last ``_ISOLATION_MEMORY`` seconds.
+    Targets that are already isolated are not counted twice.
+
+    Raises:
+        ToolError: If the action would leave more agents isolated than
+            ``PURPLEMCP_MAX_ISOLATED_AGENTS`` allows.
+    """
+    cap = get_settings().max_isolated_agents
+    console_ids, console_total = await client.get_isolated_agents()
+    now = time.time()
+    for agent_id in [a for a, until in _isolated_here.items() if until < now]:
+        del _isolated_here[agent_id]
+    known = console_ids | _isolated_here.keys()
+    unlisted = console_total - len(console_ids)  # isolated agents the console didn't list by ID
+    isolated_now = len(known) + unlisted
+    isolated_after = len(known | set(ids)) + unlisted
+    if isolated_after > cap:
+        logger.warning(
+            "Network isolation refused: over the cap",
+            extra={"isolated_now": isolated_now, "isolated_after": isolated_after, "cap": cap},
+        )
+        raise ToolError(
+            f"Refused: {isolated_now} agent(s) are already network-isolated and this would make "
+            f"{isolated_after}, more than this server allows ({cap}). Nothing was changed. Don't "
+            "retry or split the request: escalate to a human."
+        )
+    return {
+        "isolation_cap": {
+            "limit": cap,
+            "isolated_now": isolated_now,
+            "isolated_after": isolated_after,
+        }
+    }
+
+
 def _require_all_found(requested: list[str], found: list[dict[str, Any]], label: str) -> None:
     missing = sorted(set(requested) - {str(item.get("id")) for item in found})
     if missing:
@@ -403,18 +458,30 @@ async def _two_step(
     execute: Callable[[ResponseClient], Awaitable[dict[str, int]]],
     confirm: bool,
     confirmation_token: str | None,
+    guard: Callable[[ResponseClient], Awaitable[dict[str, Any]]] | None = None,
 ) -> str:
-    """Preview or perform a response action, enforcing the confirmation token."""
+    """Preview or perform a response action, enforcing the confirmation token.
+
+    *guard*, if given, runs at preview and again just before the action is sent, with the action
+    held under ``_guard_lock`` until it has been sent. It raises to refuse the action and returns
+    details to add to the preview and the result.
+    """
     agent_may_confirm = action in get_settings().agent_confirmable_actions
     if confirm:
         _check_confirmation(action, params, confirmation_token, agent_may_confirm)
-        async with _response_client() as client:
+        checks: dict[str, Any] = {}
+        async with (
+            _guard_lock if guard else contextlib.nullcontext(),
+            _response_client() as client,
+        ):
+            if guard:
+                checks = await guard(client)
             affected = await execute(client)
         logger.warning(
             "Response action executed",
             extra={"response_action": action, "response_params": params, "affected": affected},
         )
-        result: dict[str, Any] = {"sent": True, "action": action, "affected": affected}
+        result: dict[str, Any] = {"sent": True, "action": action, "affected": affected, **checks}
         targets = len(params.get("agent_ids") or params.get("threat_ids") or [])
         if any(count != targets for count in affected.values()):
             result["warning"] = (
@@ -425,12 +492,14 @@ async def _two_step(
 
     async with _response_client() as client:
         targets_found = await preview(client)
+        checks = await guard(client) if guard else {}
     return json.dumps(
         {
             "sent": False,
             "action": action,
             "arguments": params,
             "targets": targets_found,
+            **checks,
             "confirmation_token": _confirmation_token(action, params),
             "approval": "agent_policy" if agent_may_confirm else "human",
             "next": _AGENT_POLICY_NEXT if agent_may_confirm else _HUMAN_APPROVAL_NEXT,
@@ -457,7 +526,13 @@ async def disconnect_agents_from_network(
         _require_all_found(ids, agents, "Agent")
         return [_agent_summary(a) for a in agents]
 
+    async def guard(client: ResponseClient) -> dict[str, Any]:
+        return await _isolation_headroom(client, ids)
+
     async def execute(client: ResponseClient) -> dict[str, int]:
+        # Counted before sending: a request that times out may still have isolated them.
+        until = time.time() + _ISOLATION_MEMORY
+        _isolated_here.update(dict.fromkeys(ids, until))
         return {"disconnected": await client.disconnect_agents(ids)}
 
     return await _two_step(
@@ -467,6 +542,7 @@ async def disconnect_agents_from_network(
         execute=execute,
         confirm=confirm,
         confirmation_token=confirmation_token,
+        guard=guard,
     )
 
 

@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 API_PREFIX: Final[str] = "/web/api/v2.1"
 
+# Every networkStatus other than "connected": isolated, being isolated, or still being reconnected.
+ISOLATED_NETWORK_STATUSES: Final[tuple[str, ...]] = ("connecting", "disconnected", "disconnecting")
+_MAX_PAGE: Final = 1000  # largest page the agents endpoint returns
+
 
 class ResponseClient:
     """Client for the agent and threat action endpoints of the SentinelOne management API.
@@ -130,6 +134,31 @@ class ResponseClient:
     async def get_agents(self, agent_ids: Sequence[str]) -> list[dict[str, Any]]:
         """Return the agents with the given IDs that the token can see."""
         return await self._get_by_ids("/agents", agent_ids)
+
+    async def get_isolated_agents(self) -> tuple[set[str], int]:
+        """Return the IDs of network-isolated agents and the console's total count of them.
+
+        Covers every agent the token can see whose networkStatus is in
+        ``ISOLATED_NETWORK_STATUSES``, however it was isolated. The total can exceed the number of
+        IDs when there are more than one page of them or an entry has no ID.
+
+        Raises:
+            ResponseAPIError: If the response has no usable total count.
+        """
+        body = await self._request(
+            "GET",
+            "/agents",
+            params={
+                "networkStatuses": ",".join(ISOLATED_NETWORK_STATUSES),
+                "limit": _MAX_PAGE,
+            },
+        )
+        data = body.get("data")
+        total = (body.get("pagination") or {}).get("totalItems")
+        if not isinstance(data, list) or not isinstance(total, int) or isinstance(total, bool):
+            raise ResponseAPIError("Management API returned no count of isolated agents")
+        ids = {str(item["id"]) for item in data if isinstance(item, dict) and item.get("id")}
+        return ids, max(total, len(data))
 
     async def get_threats(self, threat_ids: Sequence[str]) -> list[dict[str, Any]]:
         """Return the threats with the given IDs that the token can see."""

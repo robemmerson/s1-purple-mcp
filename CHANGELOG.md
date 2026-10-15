@@ -25,6 +25,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   previews (`"approval": "agent_policy"`) and confirmation errors say no human approval is needed.
   Every other preview now carries `"approval": "human"` with the existing guidance. Guidance only;
   the preview and confirmation token are still required.
+- `PURPLEMCP_MAX_ISOLATED_AGENTS` (default `30`): `disconnect_agents_from_network` refuses, at
+  preview and again at confirmation, any action that would leave more agents network-isolated
+  than this. The count includes every isolated agent the response token can see, however it was
+  isolated, plus agents this server disconnected in the last 15 minutes. If the count can't be
+  read, the action is refused.
 
 ### Changed
 

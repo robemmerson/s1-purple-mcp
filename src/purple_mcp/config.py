@@ -14,7 +14,7 @@ from functools import lru_cache
 from typing import Annotated, ClassVar, Final, Literal, assert_never
 from urllib.parse import urlparse
 
-from pydantic import Field, PositiveFloat, field_validator
+from pydantic import Field, NonNegativeInt, PositiveFloat, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from purple_mcp import __version__
@@ -66,6 +66,7 @@ SDL_CONSOLE_SITE_IDS_ENV: Final = f"{ENV_PREFIX}SDL_CONSOLE_SITE_IDS"
 ALLOW_WRITES_ENV: Final[str] = f"{ENV_PREFIX}ALLOW_WRITES"
 RESPONSE_TOKEN_ENV: Final[str] = f"{ENV_PREFIX}RESPONSE_TOKEN"
 AGENT_CONFIRMABLE_ACTIONS_ENV: Final[str] = f"{ENV_PREFIX}AGENT_CONFIRMABLE_ACTIONS"
+MAX_ISOLATED_AGENTS_ENV: Final[str] = f"{ENV_PREFIX}MAX_ISOLATED_AGENTS"
 
 # Names of the opt-in response-action tools (purple_mcp.tools.response).
 RESPONSE_ACTION_NAMES: Final[tuple[str, ...]] = (
@@ -371,6 +372,18 @@ class Settings(BaseSettings):
         validation_alias=AGENT_CONFIRMABLE_ACTIONS_ENV,
     )
 
+    # Hard cap on network isolation. disconnect_agents_from_network refuses any action that would
+    # leave more than this many agents isolated, counting every isolated agent the response token
+    # can see however it was isolated.
+    max_isolated_agents: NonNegativeInt = Field(
+        default=30,
+        description=(
+            "Most agents that may be network-isolated at once; disconnect_agents_from_network "
+            "refuses anything that would exceed it"
+        ),
+        validation_alias=MAX_ISOLATED_AGENTS_ENV,
+    )
+
     @field_validator("agent_confirmable_actions", mode="before")
     @classmethod
     def validate_agent_confirmable_actions(cls, value: object) -> tuple[str, ...]:
@@ -669,6 +682,12 @@ class Settings(BaseSettings):
                 "Response-action tools are ENABLED (%s=true) and use %s",
                 ALLOW_WRITES_ENV,
                 RESPONSE_TOKEN_ENV,
+            )
+            logger.warning(
+                "Network isolation cap: disconnect_agents_from_network refuses to leave more "
+                "than %d agents isolated (%s)",
+                self.max_isolated_agents,
+                MAX_ISOLATED_AGENTS_ENV,
             )
             if self.agent_confirmable_actions:
                 logger.warning(
