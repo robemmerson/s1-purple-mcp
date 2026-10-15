@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from purple_mcp import __version__
 from purple_mcp.config import (
+    AGENT_CONFIRMABLE_ACTIONS_ENV,
     ALLOW_WRITES_ENV,
     ENV_PREFIX,
     RESPONSE_TOKEN_ENV,
@@ -36,6 +37,7 @@ def clear_env_and_cache(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None
         f"{ENV_PREFIX}SDL_QUERY_ORIGIN",
         ALLOW_WRITES_ENV,
         RESPONSE_TOKEN_ENV,
+        AGENT_CONFIRMABLE_ACTIONS_ENV,
     ):
         monkeypatch.delenv(var, raising=False)
     _load_base_settings.cache_clear()
@@ -1116,3 +1118,54 @@ def test_response_token_registered_as_secret(
     monkeypatch.setenv(RESPONSE_TOKEN_ENV, "write-token")
     get_settings()
     assert "write-token" in registered
+
+
+def test_agent_confirmable_actions_default_empty(minimal_env: None) -> None:
+    """No action is agent-confirmable unless configured."""
+    assert Settings().agent_confirmable_actions == ()
+
+
+def test_agent_confirmable_actions_parsed_and_logged(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A comma-separated list is trimmed, de-duplicated and logged next to the writes warning."""
+    monkeypatch.setenv(ALLOW_WRITES_ENV, "true")
+    monkeypatch.setenv(RESPONSE_TOKEN_ENV, "write-token")
+    monkeypatch.setenv(
+        AGENT_CONFIRMABLE_ACTIONS_ENV,
+        " initiate_agent_scan, disconnect_agents_from_network,,initiate_agent_scan ",
+    )
+    caplog.set_level(logging.WARNING)
+    settings = Settings()
+    assert settings.agent_confirmable_actions == (
+        "initiate_agent_scan",
+        "disconnect_agents_from_network",
+    )
+    assert (
+        "Agent may confirm without a human: initiate_agent_scan, disconnect_agents_from_network"
+        in caplog.messages
+    )
+
+
+def test_agent_confirmable_actions_unknown_name_refused(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown action name stops startup and names the valid ones."""
+    monkeypatch.setenv(ALLOW_WRITES_ENV, "true")
+    monkeypatch.setenv(RESPONSE_TOKEN_ENV, "write-token")
+    monkeypatch.setenv(AGENT_CONFIRMABLE_ACTIONS_ENV, "initiate_agent_scan,reconnect_agents")
+    with pytest.raises(ValidationError) as exc:
+        Settings()
+    message = str(exc.value)
+    assert "unknown action(s) ['reconnect_agents']" in message
+    assert "valid names are: disconnect_agents_from_network" in message
+
+
+def test_agent_confirmable_actions_ignored_when_writes_off(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Setting the list without enabling writes only warns."""
+    monkeypatch.setenv(AGENT_CONFIRMABLE_ACTIONS_ENV, "initiate_agent_scan")
+    caplog.set_level(logging.WARNING)
+    Settings()
+    assert any(AGENT_CONFIRMABLE_ACTIONS_ENV in m and "is not true" in m for m in caplog.messages)

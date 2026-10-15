@@ -15,7 +15,7 @@ from typing import Annotated, ClassVar, Final, Literal, assert_never
 from urllib.parse import urlparse
 
 from pydantic import Field, PositiveFloat, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from purple_mcp import __version__
 from purple_mcp.libs.purple_ai.config import validate_scope_id
@@ -65,6 +65,15 @@ SDL_CONSOLE_ACCOUNT_IDS_ENV: Final = f"{ENV_PREFIX}SDL_CONSOLE_ACCOUNT_IDS"
 SDL_CONSOLE_SITE_IDS_ENV: Final = f"{ENV_PREFIX}SDL_CONSOLE_SITE_IDS"
 ALLOW_WRITES_ENV: Final[str] = f"{ENV_PREFIX}ALLOW_WRITES"
 RESPONSE_TOKEN_ENV: Final[str] = f"{ENV_PREFIX}RESPONSE_TOKEN"
+AGENT_CONFIRMABLE_ACTIONS_ENV: Final[str] = f"{ENV_PREFIX}AGENT_CONFIRMABLE_ACTIONS"
+
+# Names of the opt-in response-action tools (purple_mcp.tools.response).
+RESPONSE_ACTION_NAMES: Final[tuple[str, ...]] = (
+    "disconnect_agents_from_network",
+    "initiate_agent_scan",
+    "mitigate_threats",
+    "update_threat_triage",
+)
 
 # Used solely for integration testing but defined here for consistency:
 SDL_INT_TEST_SECOND_ACCOUNT_ID_ENV: Final = f"{ENV_PREFIX}SDL_INT_TEST_SECOND_ACCOUNT_ID"
@@ -351,6 +360,33 @@ class Settings(BaseSettings):
         validation_alias=RESPONSE_TOKEN_ENV,
     )
 
+    agent_confirmable_actions: Annotated[tuple[str, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "Response actions whose previews tell the agent it may confirm them itself "
+            "(comma-separated tool names). Changes guidance text only."
+        ),
+        validation_alias=AGENT_CONFIRMABLE_ACTIONS_ENV,
+    )
+
+    @field_validator("agent_confirmable_actions", mode="before")
+    @classmethod
+    def validate_agent_confirmable_actions(cls, value: object) -> tuple[str, ...]:
+        """Parse a comma-separated list of response-action names, rejecting unknown names."""
+        if value is None:
+            return ()
+        items = value.split(",") if isinstance(value, str) else value
+        if not isinstance(items, list | tuple):
+            raise ValueError("must be a comma-separated list of response-action names")
+        names = tuple(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
+        unknown = [name for name in names if name not in RESPONSE_ACTION_NAMES]
+        if unknown:
+            raise ValueError(
+                f"{AGENT_CONFIRMABLE_ACTIONS_ENV} has unknown action(s) {unknown}; "
+                f"valid names are: {', '.join(RESPONSE_ACTION_NAMES)}"
+            )
+        return names
+
     @field_validator("response_token", mode="before")
     @classmethod
     def validate_response_token(cls, value: object) -> object:
@@ -631,6 +667,17 @@ class Settings(BaseSettings):
                 "Response-action tools are ENABLED (%s=true) and use %s",
                 ALLOW_WRITES_ENV,
                 RESPONSE_TOKEN_ENV,
+            )
+            if self.agent_confirmable_actions:
+                logger.warning(
+                    "Agent may confirm without a human: %s",
+                    ", ".join(self.agent_confirmable_actions),
+                )
+        elif self.agent_confirmable_actions:
+            logger.warning(
+                "Ignoring %s because %s is not true",
+                AGENT_CONFIRMABLE_ACTIONS_ENV,
+                ALLOW_WRITES_ENV,
             )
 
 

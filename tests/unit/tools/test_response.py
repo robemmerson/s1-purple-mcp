@@ -35,7 +35,10 @@ REASON = "ransomware behaviour on host"
 def writes_enabled(monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]:
     """Point the tools at stub settings with writes enabled and a fresh token store."""
     settings = SimpleNamespace(
-        allow_writes=True, response_token="write-token", sentinelone_console_base_url=BASE
+        allow_writes=True,
+        response_token="write-token",
+        sentinelone_console_base_url=BASE,
+        agent_confirmable_actions=(),
     )
     monkeypatch.setattr(response_tools, "get_settings", lambda: settings)
     response_tools._spent.clear()
@@ -250,6 +253,101 @@ async def test_triage_sets_both_fields() -> None:
     assert verdict.called and status.called
 
 
+# --------------------------------------------------------------------------- approval guidance
+
+# The preview guidance shipped before PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS existed. It must stay
+# verbatim for every action that is not configured as agent-confirmable.
+HUMAN_NEXT = (
+    "Show this preview to the user. Only after they explicitly approve it, call again with the "
+    "same arguments, confirm=true and this confirmation_token."
+)
+AGENT_NEXT = (
+    "Check that every target (hostnames, sites, statuses) matches what you intended. If it "
+    "does and your operating policy authorises this action, call again with the same "
+    "arguments, confirm=true and this confirmation_token. If anything is unexpected, don't "
+    "confirm: escalate to a human."
+)
+AGENT_CONFIRMABLE = ("initiate_agent_scan", "disconnect_agents_from_network")
+
+
+async def _preview_all() -> dict[str, dict[str, Any]]:
+    """Preview each of the four response actions and return the previews by action name."""
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    respx.get(f"{API}/threats").mock(return_value=_threats(THREAT))
+    previews = [
+        await _preview(disconnect_agents_from_network, agent_ids=[AGENT], reason=REASON),
+        await _preview(initiate_agent_scan, agent_ids=[AGENT], reason=REASON),
+        await _preview(mitigate_threats, threat_ids=[THREAT], action="kill", reason=REASON),
+        await _preview(
+            update_threat_triage,
+            threat_ids=[THREAT],
+            reason=REASON,
+            incident_status="in_progress",
+        ),
+    ]
+    return {p["action"]: p for p in previews}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_previews_default_to_human_approval_with_unchanged_text() -> None:
+    """With the setting unset, every preview asks for human approval in the original words."""
+    previews = await _preview_all()
+    assert set(previews) == set(RESPONSE_TOOL_NAMES)
+    for preview in previews.values():
+        assert preview["approval"] == "human"
+        assert preview["next"] == HUMAN_NEXT
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_configured_actions_get_agent_policy_guidance(
+    writes_enabled: SimpleNamespace,
+) -> None:
+    """Only the configured actions tell the agent it may confirm under its own policy."""
+    writes_enabled.agent_confirmable_actions = AGENT_CONFIRMABLE
+    previews = await _preview_all()
+    for name, preview in previews.items():
+        if name in AGENT_CONFIRMABLE:
+            assert preview["approval"] == "agent_policy"
+            assert preview["next"] == AGENT_NEXT
+        else:
+            assert preview["approval"] == "human"
+            assert preview["next"] == HUMAN_NEXT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmable", [(), AGENT_CONFIRMABLE])
+@respx.mock
+async def test_confirmation_token_still_required_in_every_mode(
+    writes_enabled: SimpleNamespace, confirmable: tuple[str, ...]
+) -> None:
+    """Agent-confirmable actions still need a matching, unused token from a preview."""
+    writes_enabled.agent_confirmable_actions = confirmable
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT, AGENT2))
+    action = respx.post(f"{API}/agents/actions/disconnect").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+
+    with pytest.raises(ToolError, match="needs the confirmation_token"):
+        await disconnect_agents_from_network(agent_ids=[AGENT], reason=REASON, confirm=True)
+
+    token = (await _preview(disconnect_agents_from_network, agent_ids=[AGENT], reason=REASON))[
+        "confirmation_token"
+    ]
+    with pytest.raises(ToolError, match="doesn't match"):
+        await disconnect_agents_from_network(
+            agent_ids=[AGENT2], reason=REASON, confirm=True, confirmation_token=token
+        )
+    assert not action.called
+
+    kwargs = {"agent_ids": [AGENT], "reason": REASON, "confirm": True, "confirmation_token": token}
+    await disconnect_agents_from_network(**kwargs)
+    with pytest.raises(ToolError, match="already used"):
+        await disconnect_agents_from_network(**kwargs)
+    assert action.call_count == 1
+
+
 # --------------------------------------------------------------------------- input validation
 
 
@@ -318,3 +416,104 @@ async def test_register_response_tools_with_annotations() -> None:
     schema = tools["disconnect_agents_from_network"].inputSchema
     assert schema["properties"]["agent_ids"]["maxItems"] == MAX_TARGETS
     assert set(schema["required"]) == {"agent_ids", "reason"}
+
+
+# --------------------------------------------------------------------------- agent-facing wording
+
+# Phrases that send the agent to a human. None may reach an agent for an agent-confirmable action.
+HUMAN_PHRASES = ("to the user", "user's approval", "user approved", "they explicitly approve")
+
+
+async def _listed_tools(agent_confirmable: tuple[str, ...]) -> dict[str, Any]:
+    """Register the tools with the given agent-confirmable set and return them by name."""
+    mcp: fastmcp.FastMCP[None] = fastmcp.FastMCP("test")
+    register_response_tools(mcp, agent_confirmable)
+    async with Client(mcp) as client:
+        return {t.name: t for t in await client.list_tools()}
+
+
+@pytest.mark.asyncio
+async def test_default_registration_asks_for_human_approval() -> None:
+    """Without agent-confirmable actions every description and confirm parameter asks a human."""
+    for tool in (await _listed_tools(())).values():
+        assert "Show that preview to the user" in (tool.description or "")
+        assert tool.inputSchema["properties"]["confirm"]["description"] == (
+            "Perform the action. Only after the user approved the preview"
+        )
+
+
+@pytest.mark.asyncio
+async def test_registration_wording_follows_agent_confirmable_actions() -> None:
+    """Configured tools describe agent confirmation; the others still ask for a human."""
+    tools = await _listed_tools(AGENT_CONFIRMABLE)
+    for name, tool in tools.items():
+        description = tool.description or ""
+        confirm = tool.inputSchema["properties"]["confirm"]["description"]
+        if name in AGENT_CONFIRMABLE:
+            assert "no human approval is" in description
+            assert "escalate to a human" in description
+            assert "no human approval is needed" in confirm
+            assert not any(p in description + confirm for p in HUMAN_PHRASES)
+        else:
+            assert "Show that preview to the user" in description
+            assert "user approved" in confirm
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_agent_confirmable_actions_never_tell_the_agent_to_wait_for_a_human(
+    writes_enabled: SimpleNamespace,
+) -> None:
+    """Description, schema, preview and every confirmation error avoid human-approval wording."""
+    writes_enabled.agent_confirmable_actions = AGENT_CONFIRMABLE
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    respx.post(f"{API}/agents/actions/disconnect").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    respx.post(f"{API}/agents/actions/initiate-scan").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    tools = await _listed_tools(AGENT_CONFIRMABLE)
+
+    for tool_fn in (disconnect_agents_from_network, initiate_agent_scan):
+        listed = tools[tool_fn.__name__]
+        texts = [listed.description or "", json.dumps(listed.inputSchema)]
+
+        preview = await _preview(tool_fn, agent_ids=[AGENT], reason=REASON)
+        texts.append(json.dumps(preview))
+        token = preview["confirmation_token"]
+
+        for kwargs in (
+            {"agent_ids": [AGENT], "reason": REASON, "confirm": True},  # no token
+            {
+                "agent_ids": [AGENT2],
+                "reason": REASON,
+                "confirm": True,
+                "confirmation_token": token,
+            },
+        ):
+            with pytest.raises(ToolError) as exc:
+                await tool_fn(**kwargs)
+            texts.append(str(exc.value))
+
+        done = await tool_fn(
+            agent_ids=[AGENT], reason=REASON, confirm=True, confirmation_token=token
+        )
+        texts.append(done)
+        with pytest.raises(ToolError, match="already used") as exc:
+            await tool_fn(agent_ids=[AGENT], reason=REASON, confirm=True, confirmation_token=token)
+        texts.append(str(exc.value))
+
+        for text in texts:
+            assert not any(p in text for p in HUMAN_PHRASES), text
+
+
+@pytest.mark.asyncio
+async def test_confirmation_errors_keep_human_wording_by_default() -> None:
+    """Without the setting, confirmation errors still send the agent to the user."""
+    with pytest.raises(ToolError, match="show the preview to the user"):
+        await initiate_agent_scan(agent_ids=[AGENT], reason=REASON, confirm=True)
+    with pytest.raises(ToolError, match="get the user's approval"):
+        await initiate_agent_scan(
+            agent_ids=[AGENT], reason=REASON, confirm=True, confirmation_token="bad.token"
+        )

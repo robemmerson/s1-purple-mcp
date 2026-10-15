@@ -28,7 +28,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from purple_mcp.config import get_settings
+from purple_mcp.config import RESPONSE_ACTION_NAMES, get_settings
 from purple_mcp.libs.response import ResponseClient
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,25 @@ _Token = Annotated[
     Field(description="The confirmation_token returned by the preview of this exact action"),
 ]
 
+# Agent-facing guidance comes in two variants. PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS chooses, per
+# action, whether the tool description, the confirm parameter, each preview and each confirmation
+# error tell the agent to wait for a human or to confirm under its own operating policy. It only
+# chooses text: confirming still needs the token from a matching preview either way.
+_AGENT_CONFIRM_DESCRIPTION: Final = (
+    "Perform the action. Only after checking the preview's targets; no human approval is "
+    "needed if your operating policy authorises this action"
+)
+_HUMAN_APPROVAL_NEXT: Final = (
+    "Show this preview to the user. Only after they explicitly approve it, call "
+    "again with the same arguments, confirm=true and this confirmation_token."
+)
+_AGENT_POLICY_NEXT: Final = (
+    "Check that every target (hostnames, sites, statuses) matches what you intended. If it "
+    "does and your operating policy authorises this action, call again with the same "
+    "arguments, confirm=true and this confirmation_token. If anything is unexpected, don't "
+    "confirm: escalate to a human."
+)
+
 _CONFIRM_KEY: Final = secrets.token_bytes(32)
 _spent: dict[str, float] = {}  # nonce -> when it can be forgotten; each token confirms one action
 
@@ -89,101 +108,111 @@ _TWO_STEP_NOTE: Final = dedent(
     """
 ).strip()
 
-DISCONNECT_AGENTS_DESCRIPTION: Final[str] = (
-    dedent(
-        f"""
-    Disconnect SentinelOne agents from the network (network quarantine / isolation).
-
-    The endpoints lose all network access except to the SentinelOne management console, so
-    analysts can keep investigating and reconnect them later from the console. Use this to
-    contain a host where an active threat is suspected.
-
-    Args:
-        agent_ids: 1-{MAX_TARGETS} agent IDs (the numeric agent ID, not the UUID).
-        reason: Why the hosts must be isolated.
-        confirm: false to preview, true to perform.
-        confirmation_token: Token from the preview.
-
-    Returns:
-        JSON. Preview: target agents (name, site, current network status) and a
-        confirmation_token. Confirmed: the number of agents affected.
+_AGENT_TWO_STEP_NOTE: Final = dedent(
     """
-    ).strip()
-    + "\n\n"
-    + _TWO_STEP_NOTE
-)
-
-INITIATE_SCAN_DESCRIPTION: Final[str] = (
-    dedent(
-        f"""
-    Start a full disk scan on SentinelOne agents.
-
-    Args:
-        agent_ids: 1-{MAX_TARGETS} agent IDs (the numeric agent ID, not the UUID).
-        reason: Why the scan is needed.
-        confirm: false to preview, true to perform.
-        confirmation_token: Token from the preview.
-
-    Returns:
-        JSON. Preview: target agents and a confirmation_token. Confirmed: the number of agents
-        affected.
+    This is a write action and runs in two steps:
+    1. Call with confirm=false (the default). Nothing changes; the response lists the targets
+       and includes a confirmation_token.
+    2. This server lets an authorised agent confirm this action itself; no human approval is
+       needed. Check that every target in the preview (hostnames, sites, statuses) matches what
+       you intended. If it does and your operating policy authorises this action, call again
+       with the same arguments, confirm=true and the confirmation_token. If anything is
+       unexpected, don't confirm: escalate to a human. Each token is valid for 30 minutes and
+       for one call.
     """
-    ).strip()
-    + "\n\n"
-    + _TWO_STEP_NOTE
-)
+).strip()
 
-MITIGATE_THREATS_DESCRIPTION: Final[str] = (
-    dedent(
-        f"""
-    Apply a mitigation action to SentinelOne threats.
+_DISCONNECT_AGENTS_BASE: Final[str] = dedent(
+    f"""
+Disconnect SentinelOne agents from the network (network quarantine / isolation).
 
-    Actions:
-        kill: Kill the threat's processes.
-        quarantine: Quarantine the threat's files.
-        remediate: Kill, quarantine and undo the threat's changes to the system.
-        rollback-remediation: Roll the system back to before the threat (Windows, VSS).
-        un-quarantine: Restore files previously quarantined.
+The endpoints lose all network access except to the SentinelOne management console, so
+analysts can keep investigating and reconnect them later from the console. Use this to
+contain a host where an active threat is suspected.
 
-    Args:
-        threat_ids: 1-{MAX_TARGETS} threat IDs.
-        action: One of the actions above.
-        reason: Why the mitigation is needed.
-        confirm: false to preview, true to perform.
-        confirmation_token: Token from the preview.
+Args:
+    agent_ids: 1-{MAX_TARGETS} agent IDs (the numeric agent ID, not the UUID).
+    reason: Why the hosts must be isolated.
+    confirm: false to preview, true to perform.
+    confirmation_token: Token from the preview.
 
-    Returns:
-        JSON. Preview: target threats (name, endpoint, current mitigation status) and a
-        confirmation_token. Confirmed: the number of threats affected.
-    """
-    ).strip()
-    + "\n\n"
-    + _TWO_STEP_NOTE
-)
+Returns:
+    JSON. Preview: target agents (name, site, current network status) and a
+    confirmation_token. Confirmed: the number of agents affected.
+"""
+).strip()
 
-UPDATE_THREAT_TRIAGE_DESCRIPTION: Final[str] = (
-    dedent(
-        f"""
-    Set the analyst verdict and/or incident status of SentinelOne threats.
+_INITIATE_SCAN_BASE: Final[str] = dedent(
+    f"""
+Start a full disk scan on SentinelOne agents.
 
-    Args:
-        threat_ids: 1-{MAX_TARGETS} threat IDs.
-        analyst_verdict: true_positive, false_positive, suspicious or undefined (optional).
-        incident_status: unresolved, in_progress or resolved (optional).
-        reason: Why the triage is being changed.
-        confirm: false to preview, true to perform.
-        confirmation_token: Token from the preview.
+Args:
+    agent_ids: 1-{MAX_TARGETS} agent IDs (the numeric agent ID, not the UUID).
+    reason: Why the scan is needed.
+    confirm: false to preview, true to perform.
+    confirmation_token: Token from the preview.
 
-    At least one of analyst_verdict and incident_status is required.
+Returns:
+    JSON. Preview: target agents and a confirmation_token. Confirmed: the number of agents
+    affected.
+"""
+).strip()
 
-    Returns:
-        JSON. Preview: target threats with their current verdict and status, and a
-        confirmation_token. Confirmed: the number of threats affected per field.
-    """
-    ).strip()
-    + "\n\n"
-    + _TWO_STEP_NOTE
-)
+_MITIGATE_THREATS_BASE: Final[str] = dedent(
+    f"""
+Apply a mitigation action to SentinelOne threats.
+
+Actions:
+    kill: Kill the threat's processes.
+    quarantine: Quarantine the threat's files.
+    remediate: Kill, quarantine and undo the threat's changes to the system.
+    rollback-remediation: Roll the system back to before the threat (Windows, VSS).
+    un-quarantine: Restore files previously quarantined.
+
+Args:
+    threat_ids: 1-{MAX_TARGETS} threat IDs.
+    action: One of the actions above.
+    reason: Why the mitigation is needed.
+    confirm: false to preview, true to perform.
+    confirmation_token: Token from the preview.
+
+Returns:
+    JSON. Preview: target threats (name, endpoint, current mitigation status) and a
+    confirmation_token. Confirmed: the number of threats affected.
+"""
+).strip()
+
+_UPDATE_THREAT_TRIAGE_BASE: Final[str] = dedent(
+    f"""
+Set the analyst verdict and/or incident status of SentinelOne threats.
+
+Args:
+    threat_ids: 1-{MAX_TARGETS} threat IDs.
+    analyst_verdict: true_positive, false_positive, suspicious or undefined (optional).
+    incident_status: unresolved, in_progress or resolved (optional).
+    reason: Why the triage is being changed.
+    confirm: false to preview, true to perform.
+    confirmation_token: Token from the preview.
+
+At least one of analyst_verdict and incident_status is required.
+
+Returns:
+    JSON. Preview: target threats with their current verdict and status, and a
+    confirmation_token. Confirmed: the number of threats affected per field.
+"""
+).strip()
+
+
+def _description(base: str, agent_may_confirm: bool) -> str:
+    """Return a tool description with the two-step note for the configured approval mode."""
+    return f"{base}\n\n{_AGENT_TWO_STEP_NOTE if agent_may_confirm else _TWO_STEP_NOTE}"
+
+
+# Default (human-approval) descriptions.
+DISCONNECT_AGENTS_DESCRIPTION: Final[str] = _description(_DISCONNECT_AGENTS_BASE, False)
+INITIATE_SCAN_DESCRIPTION: Final[str] = _description(_INITIATE_SCAN_BASE, False)
+MITIGATE_THREATS_DESCRIPTION: Final[str] = _description(_MITIGATE_THREATS_BASE, False)
+UPDATE_THREAT_TRIAGE_DESCRIPTION: Final[str] = _description(_UPDATE_THREAT_TRIAGE_BASE, False)
 
 
 # --------------------------------------------------------------------------- confirmation tokens
@@ -199,17 +228,35 @@ def _confirmation_token(action: str, params: dict[str, Any]) -> str:
     return f"{nonce}.{_token_mac(action, params, nonce, int(time.time() // CONFIRM_TTL))}"
 
 
-def _check_confirmation(action: str, params: dict[str, Any], token: str | None) -> None:
+def _check_confirmation(
+    action: str, params: dict[str, Any], token: str | None, agent_may_confirm: bool = False
+) -> None:
     """Accept *token* once if it was issued for exactly this action and these parameters.
+
+    Args:
+        action: The response action being confirmed.
+        params: The normalised arguments the token must have been issued for.
+        token: The confirmation_token supplied by the caller.
+        agent_may_confirm: Word the errors for an agent allowed to confirm this action itself.
 
     Raises:
         ToolError: If the token is missing, reused, expired, or for a different action.
     """
+    re_preview = (
+        "Preview again and check what it shows before confirming."
+        if agent_may_confirm
+        else "Preview again and get the user's approval for what it shows."
+    )
     if not token:
         raise ToolError(
             "confirm=true needs the confirmation_token from a preview of this exact action. "
-            "Call without confirm first, show the preview to the user, and confirm only after "
-            "they approve it."
+            + (
+                "Call without confirm first, check the targets it lists, and confirm with its "
+                "token if they match what you intended."
+                if agent_may_confirm
+                else "Call without confirm first, show the preview to the user, and confirm only "
+                "after they approve it."
+            )
         )
     now = time.time()
     for nonce in [n for n, until in _spent.items() if until < now]:
@@ -217,8 +264,7 @@ def _check_confirmation(action: str, params: dict[str, Any], token: str | None) 
     nonce, _, mac = token.strip().partition(".")
     if nonce in _spent:
         raise ToolError(
-            "This confirmation_token was already used: each preview approves one action. "
-            "Preview again and get the user's approval for what it shows."
+            f"This confirmation_token was already used: each preview approves one action. {re_preview}"
         )
     bucket = int(now // CONFIRM_TTL)
     for b in (bucket, bucket - 1):
@@ -227,7 +273,7 @@ def _check_confirmation(action: str, params: dict[str, Any], token: str | None) 
             return
     raise ToolError(
         "confirmation_token doesn't match this action (different arguments, expired, or the "
-        "server restarted). Preview again and get the user's approval for what it shows."
+        f"server restarted). {re_preview}"
     )
 
 
@@ -322,8 +368,9 @@ async def _two_step(
     confirmation_token: str | None,
 ) -> str:
     """Preview or perform a response action, enforcing the confirmation token."""
+    agent_may_confirm = action in get_settings().agent_confirmable_actions
     if confirm:
-        _check_confirmation(action, params, confirmation_token)
+        _check_confirmation(action, params, confirmation_token, agent_may_confirm)
         async with _response_client() as client:
             affected = await execute(client)
         logger.warning(
@@ -348,10 +395,8 @@ async def _two_step(
             "arguments": params,
             "targets": targets_found,
             "confirmation_token": _confirmation_token(action, params),
-            "next": (
-                "Show this preview to the user. Only after they explicitly approve it, call "
-                "again with the same arguments, confirm=true and this confirmation_token."
-            ),
+            "approval": "agent_policy" if agent_may_confirm else "human",
+            "next": _AGENT_POLICY_NEXT if agent_may_confirm else _HUMAN_APPROVAL_NEXT,
         },
         indent=2,
     )
@@ -493,25 +538,34 @@ async def update_threat_triage(
     )
 
 
-RESPONSE_TOOL_NAMES: Final[tuple[str, ...]] = (
-    "disconnect_agents_from_network",
-    "initiate_agent_scan",
-    "mitigate_threats",
-    "update_threat_triage",
-)
+RESPONSE_TOOL_NAMES: Final[tuple[str, ...]] = RESPONSE_ACTION_NAMES
 
 
-def register_response_tools(app: fastmcp.FastMCP[None]) -> None:
+def register_response_tools(
+    app: fastmcp.FastMCP[None], agent_confirmable: Iterable[str] = ()
+) -> None:
     """Register the response-action tools on *app*.
 
     Only call this when ``PURPLEMCP_ALLOW_WRITES`` is enabled; the tools also refuse to run if
     it is not.
+
+    Args:
+        app: The server to register the tools on.
+        agent_confirmable: Names of actions whose description and ``confirm`` parameter tell the
+            agent it may confirm them itself (``PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS``). All
+            others ask for human approval.
     """
-    app.tool(description=DISCONNECT_AGENTS_DESCRIPTION, annotations=_DESTRUCTIVE)(
-        disconnect_agents_from_network
+    confirmable = frozenset(agent_confirmable)
+    tools: tuple[tuple[Callable[..., Awaitable[str]], str, ToolAnnotations], ...] = (
+        (disconnect_agents_from_network, _DISCONNECT_AGENTS_BASE, _DESTRUCTIVE),
+        (initiate_agent_scan, _INITIATE_SCAN_BASE, _WRITE),
+        (mitigate_threats, _MITIGATE_THREATS_BASE, _DESTRUCTIVE),
+        (update_threat_triage, _UPDATE_THREAT_TRIAGE_BASE, _WRITE),
     )
-    app.tool(description=INITIATE_SCAN_DESCRIPTION, annotations=_WRITE)(initiate_agent_scan)
-    app.tool(description=MITIGATE_THREATS_DESCRIPTION, annotations=_DESTRUCTIVE)(mitigate_threats)
-    app.tool(description=UPDATE_THREAT_TRIAGE_DESCRIPTION, annotations=_WRITE)(
-        update_threat_triage
-    )
+    for fn, base, annotations in tools:
+        agent_may_confirm = fn.__name__ in confirmable
+        tool = app.tool(
+            description=_description(base, agent_may_confirm), annotations=annotations
+        )(fn)
+        if agent_may_confirm:
+            tool.parameters["properties"]["confirm"]["description"] = _AGENT_CONFIRM_DESCRIPTION

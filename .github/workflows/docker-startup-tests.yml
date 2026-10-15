@@ -113,8 +113,8 @@ jobs:
           (sleep 2 && echo '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test-client", "version": "1.0.0"}}}' && sleep 1 && echo '{"jsonrpc": "2.0", "method": "notifications/initialized"}' && sleep 1) | timeout 20 docker run \
             --rm \
             -i \
-            -e PURPLEMCP_CONSOLE_TOKEN="${{ secrets.CONSOLE_TOKEN }}" \
-            -e PURPLEMCP_CONSOLE_BASE_URL="${{ secrets.CONSOLE_BASE_URL }}" \
+            -e PURPLEMCP_CONSOLE_TOKEN="${{ secrets.CONSOLE_TOKEN || 'ci-dummy-console-token' }}" \
+            -e PURPLEMCP_CONSOLE_BASE_URL="${{ secrets.CONSOLE_BASE_URL || 'https://console.example.test' }}" \
             purple-mcp:${{ github.sha }} \
             --mode stdio
           exit_code=$?
@@ -139,8 +139,8 @@ jobs:
             --detach \
             --name purple-mcp-${{ matrix.mode }}-test \
             -p ${{ matrix.port }}:${{ matrix.port }} \
-            -e PURPLEMCP_CONSOLE_TOKEN="${{ secrets.CONSOLE_TOKEN }}" \
-            -e PURPLEMCP_CONSOLE_BASE_URL="${{ secrets.CONSOLE_BASE_URL }}" \
+            -e PURPLEMCP_CONSOLE_TOKEN="${{ secrets.CONSOLE_TOKEN || 'ci-dummy-console-token' }}" \
+            -e PURPLEMCP_CONSOLE_BASE_URL="${{ secrets.CONSOLE_BASE_URL || 'https://console.example.test' }}" \
             -e MCP_MODE=${{ matrix.env_mode }} \
             -e MCP_PORT=${{ matrix.port }} \
             -e MCP_API_KEY=ci-test-api-key \
@@ -347,8 +347,8 @@ jobs:
           export PURPLEMCP_AUTH_TOKEN="test-token-12345"
           # nginx forwards the Authorization header, so the backend accepts the same key
           export MCP_API_KEY="$PURPLEMCP_AUTH_TOKEN"
-          export PURPLEMCP_CONSOLE_TOKEN="${{ secrets.CONSOLE_TOKEN }}"
-          export PURPLEMCP_CONSOLE_BASE_URL="${{ secrets.CONSOLE_BASE_URL }}"
+          export PURPLEMCP_CONSOLE_TOKEN="${{ secrets.CONSOLE_TOKEN || 'ci-dummy-console-token' }}"
+          export PURPLEMCP_CONSOLE_BASE_URL="${{ secrets.CONSOLE_BASE_URL || 'https://console.example.test' }}"
 
           # Verify token was substituted correctly in the generated config
           GENERATED_CONFIG=$(docker run --rm \

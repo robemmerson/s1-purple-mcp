@@ -109,6 +109,23 @@ clients that handle `isError` themselves.
 Point the ingress health probes at `GET /health` (no key needed) and the MCP client at
 `https://<app>.<env>.<region>.azurecontainerapps.io/mcp`.
 
+To let agents run [response actions](../README.md#response-actions-opt-in), add a separate token.
+`PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS` lists the actions an autonomous agent (for example a
+webhook-driven Foundry agent with no human present) may confirm itself:
+
+```bash
+PURPLEMCP_ALLOW_WRITES=true
+PURPLEMCP_RESPONSE_TOKEN=secretref:response-token
+PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS=initiate_agent_scan,disconnect_agents_from_network
+```
+
+For the listed actions, the tool descriptions, previews and confirmation errors then tell the
+agent it may confirm without a human; the others keep asking for human approval. This only
+changes that guidance: the agent still has to preview and confirm with the token it gets back. It
+is not an approval mechanism. Enforce human approval for the riskier
+actions (`mitigate_threats`, `update_threat_triage`) in Foundry's MCP tool approval settings, and
+use `allowed_tools` to give each agent only the tools it needs.
+
 ### Cloud Native Setup
 
 For more detailed cloud setup instructions, see [CLOUD_SETUP.md](cloud/CLOUD_SETUP.md).
