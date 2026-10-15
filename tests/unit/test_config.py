@@ -15,6 +15,7 @@ from purple_mcp.config import (
     AGENT_CONFIRMABLE_ACTIONS_ENV,
     ALLOW_WRITES_ENV,
     ENV_PREFIX,
+    MAX_ISOLATED_AGENTS_ENV,
     RESPONSE_TOKEN_ENV,
     SDL_BASE_URL_ENV,
     SDL_QUERY_ORIGIN_ENV,
@@ -38,6 +39,7 @@ def clear_env_and_cache(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None
         ALLOW_WRITES_ENV,
         RESPONSE_TOKEN_ENV,
         AGENT_CONFIRMABLE_ACTIONS_ENV,
+        MAX_ISOLATED_AGENTS_ENV,
     ):
         monkeypatch.delenv(var, raising=False)
     _load_base_settings.cache_clear()
@@ -1169,3 +1171,30 @@ def test_agent_confirmable_actions_ignored_when_writes_off(
     caplog.set_level(logging.WARNING)
     Settings()
     assert any(AGENT_CONFIRMABLE_ACTIONS_ENV in m and "is not true" in m for m in caplog.messages)
+
+
+def test_max_isolated_agents_defaults_to_30(minimal_env: None) -> None:
+    """The isolation cap is 30 unless configured."""
+    assert Settings().max_isolated_agents == 30
+
+
+def test_max_isolated_agents_configurable_and_logged(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The cap can be lowered (including to zero) and is logged when writes are on."""
+    monkeypatch.setenv(ALLOW_WRITES_ENV, "true")
+    monkeypatch.setenv(RESPONSE_TOKEN_ENV, "write-token")
+    monkeypatch.setenv(MAX_ISOLATED_AGENTS_ENV, "0")
+    caplog.set_level(logging.WARNING)
+    assert Settings().max_isolated_agents == 0
+    assert any("refuses to leave more than 0 agents isolated" in m for m in caplog.messages)
+
+
+@pytest.mark.parametrize("value", ["-1", "thirty", "2.5"])
+def test_max_isolated_agents_rejects_invalid_values(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """A negative or non-integer cap refuses to start."""
+    monkeypatch.setenv(MAX_ISOLATED_AGENTS_ENV, value)
+    with pytest.raises(ValidationError, match=MAX_ISOLATED_AGENTS_ENV):
+        Settings()
