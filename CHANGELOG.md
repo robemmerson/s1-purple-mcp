@@ -14,8 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Opt-in `MCP_TOOL_ERRORS_AS_TEXT` mode that returns tool errors as `ERROR: <message>` text results
   with `isError: false`, for clients such as Microsoft Foundry Agent Service that abort the run on
   `isError: true`. Off by default.
-- Opt-in response-action tools: `disconnect_agents_from_network`, `initiate_agent_scan`,
-  `mitigate_threats` and `update_threat_triage`. Registered only when
+- Opt-in response-action tools: `disconnect_agents_from_network`, `reconnect_agents_to_network`,
+  `initiate_agent_scan`, `abort_agent_scan`, `mitigate_threats` and `update_threat_triage`.
+  Registered only when
   `PURPLEMCP_ALLOW_WRITES=true`, authenticated with a separate `PURPLEMCP_RESPONSE_TOKEN`, limited
   to 10 explicit IDs per call, and each change needs a preview followed by a single-use, signed
   confirmation token.

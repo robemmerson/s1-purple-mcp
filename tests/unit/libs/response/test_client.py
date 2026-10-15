@@ -158,3 +158,23 @@ async def test_request_outside_context_manager() -> None:
     """Test: request outside context manager."""
     with pytest.raises(ResponseAPIError, match="not initialized"):
         await _client().disconnect_agents(AGENT_IDS)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_reconnect_and_abort_scan_endpoints() -> None:
+    """Reconnect posts to /connect with an ID filter; abort-scan posts empty data."""
+    connect = respx.post(f"{API}/agents/actions/connect").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 2}})
+    )
+    abort = respx.post(f"{API}/agents/actions/abort-scan").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    async with _client() as client:
+        assert await client.reconnect_agents(AGENT_IDS) == 2
+        assert await client.abort_scan(AGENT_IDS[:1]) == 1
+    assert json.loads(connect.calls.last.request.content) == {"filter": {"ids": AGENT_IDS}}
+    assert json.loads(abort.calls.last.request.content) == {
+        "filter": {"ids": AGENT_IDS[:1]},
+        "data": {},
+    }

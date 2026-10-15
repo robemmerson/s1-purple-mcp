@@ -122,9 +122,9 @@ PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS=initiate_agent_scan,disconnect_agents_from_n
 For the listed actions, the tool descriptions, previews and confirmation errors then tell the
 agent it may confirm without a human; the others keep asking for human approval. This only
 changes that guidance: the agent still has to preview and confirm with the token it gets back. It
-is not an approval mechanism. Enforce human approval for the riskier
-actions (`mitigate_threats`, `update_threat_triage`) in Foundry's MCP tool approval settings, and
-use `allowed_tools` to give each agent only the tools it needs.
+is not an approval mechanism. Enforce human approval for the riskier actions
+(`reconnect_agents_to_network`, `mitigate_threats`, `update_threat_triage`) in Foundry's MCP tool
+approval settings, and use `allowed_tools` to give each agent only the tools it needs.
 
 ### Cloud Native Setup
 

@@ -325,8 +325,11 @@ The only tools that change anything. They are **not registered** unless
 separate token from `PURPLEMCP_CONSOLE_TOKEN` (the server refuses to start if the two match):
 
 - `disconnect_agents_from_network(agent_ids, reason)` - Network-isolate agents. They keep their
-  connection to the management console, so they can be reconnected from the console.
+  connection to the management console, so they can be reconnected later.
+- `reconnect_agents_to_network(agent_ids, reason)` - Undo an isolation and restore normal network
+  access.
 - `initiate_agent_scan(agent_ids, reason)` - Start a full disk scan.
+- `abort_agent_scan(agent_ids, reason)` - Stop a running full disk scan.
 - `mitigate_threats(threat_ids, action, reason)` - `kill`, `quarantine`, `remediate`,
   `rollback-remediation` or `un-quarantine`.
 - `update_threat_triage(threat_ids, reason, analyst_verdict, incident_status)` - Set the analyst
@@ -368,6 +371,13 @@ The server cannot tell whether a human approved anything, so real approval for r
 be enforced by the calling platform (for example Microsoft Foundry's MCP tool approval setting).
 Unknown names stop the server from starting; the setting is ignored, with a warning, unless
 `PURPLEMCP_ALLOW_WRITES=true`.
+
+Think separately about `reconnect_agents_to_network`. Reconnecting a host that is still
+compromised lets the threat spread again, so leave it out of the list (human approval) unless the
+agent is also trusted to decide when a host is clean. Leaving it unlisted only changes the
+guidance, so to keep an agent from reconnecting at all, leave the tool out of its allowed tools on
+the calling platform, or leave the SentinelOne role's **Reconnect To Network** permission off the
+response token.
 
 ## Environment Variables
 
