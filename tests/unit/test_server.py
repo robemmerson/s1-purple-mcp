@@ -124,6 +124,15 @@ class TestToolRegistration:
     """Tests for MCP tool registration."""
 
     @pytest.mark.asyncio
+    async def test_response_tools_not_registered_by_default(self) -> None:
+        """Write tools stay off unless PURPLEMCP_ALLOW_WRITES is enabled."""
+        from purple_mcp.tools.response import RESPONSE_TOOL_NAMES
+
+        async with Client(app) as client:
+            tool_names = {tool.name for tool in await client.list_tools()}
+        assert tool_names.isdisjoint(RESPONSE_TOOL_NAMES)
+
+    @pytest.mark.asyncio
     async def test_purple_ai_tool_registered(self, valid_env_config: dict[str, str]) -> None:
         """Test that purple_ai tool is properly registered."""
         async with Client(app) as client:

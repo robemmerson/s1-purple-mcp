@@ -1,0 +1,320 @@
+"""Tests for the opt-in response-action tools."""
+
+import json
+from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Any
+
+import fastmcp
+import httpx
+import pytest
+import respx
+from fastmcp import Client
+from fastmcp.exceptions import ToolError
+
+import purple_mcp.tools.response as response_tools
+from purple_mcp.tools.response import (
+    MAX_TARGETS,
+    RESPONSE_TOOL_NAMES,
+    disconnect_agents_from_network,
+    initiate_agent_scan,
+    mitigate_threats,
+    register_response_tools,
+    update_threat_triage,
+)
+
+BASE = "https://console.example.test"
+API = f"{BASE}/web/api/v2.1"
+AGENT = "111111111111111111"
+AGENT2 = "222222222222222222"
+THREAT = "333333333333333333"
+REASON = "ransomware behaviour on host"
+
+
+@pytest.fixture(autouse=True)
+def writes_enabled(monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]:
+    """Point the tools at stub settings with writes enabled and a fresh token store."""
+    settings = SimpleNamespace(
+        allow_writes=True, response_token="write-token", sentinelone_console_base_url=BASE
+    )
+    monkeypatch.setattr(response_tools, "get_settings", lambda: settings)
+    response_tools._spent.clear()
+    yield settings
+    response_tools._spent.clear()
+
+
+def _agents(*ids: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "data": [
+                {"id": i, "computerName": f"host-{i[-1]}", "networkStatus": "connected"}
+                for i in ids
+            ]
+        },
+    )
+
+
+def _threats(*ids: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "data": [
+                {
+                    "id": i,
+                    "threatInfo": {"threatName": "evil.exe", "mitigationStatus": "not_mitigated"},
+                    "agentRealtimeInfo": {"agentComputerName": "host-1", "agentId": AGENT},
+                }
+                for i in ids
+            ]
+        },
+    )
+
+
+async def _preview(tool: Any, **kwargs: Any) -> dict[str, Any]:
+    result: dict[str, Any] = json.loads(await tool(**kwargs))
+    assert result["sent"] is False
+    return result
+
+
+# --------------------------------------------------------------------------- two-step flow
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_disconnect_preview_then_confirm() -> None:
+    """Test: disconnect preview then confirm."""
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT, AGENT2))
+    action = respx.post(f"{API}/agents/actions/disconnect").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 2}})
+    )
+
+    preview = await _preview(
+        disconnect_agents_from_network, agent_ids=[AGENT2, AGENT, AGENT], reason=REASON
+    )
+    assert not action.called
+    assert [t["computerName"] for t in preview["targets"]] == ["host-1", "host-2"]
+    assert preview["arguments"]["agent_ids"] == [AGENT, AGENT2]  # de-duplicated and sorted
+
+    done = json.loads(
+        await disconnect_agents_from_network(
+            agent_ids=[AGENT, AGENT2],
+            reason=REASON,
+            confirm=True,
+            confirmation_token=preview["confirmation_token"],
+        )
+    )
+    assert done == {
+        "sent": True,
+        "action": "disconnect_agents_from_network",
+        "affected": {"disconnected": 2},
+    }
+    assert json.loads(action.calls.last.request.content) == {"filter": {"ids": [AGENT, AGENT2]}}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_confirm_without_token_is_refused() -> None:
+    """Test: confirm without token is refused."""
+    action = respx.post(f"{API}/agents/actions/disconnect")
+    with pytest.raises(ToolError, match="needs the confirmation_token"):
+        await disconnect_agents_from_network(agent_ids=[AGENT], reason=REASON, confirm=True)
+    assert not action.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_token_is_single_use() -> None:
+    """Test: token is single use."""
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    respx.post(f"{API}/agents/actions/initiate-scan").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    token = (await _preview(initiate_agent_scan, agent_ids=[AGENT], reason=REASON))[
+        "confirmation_token"
+    ]
+    kwargs = {"agent_ids": [AGENT], "reason": REASON, "confirm": True, "confirmation_token": token}
+    await initiate_agent_scan(**kwargs)
+    with pytest.raises(ToolError, match="already used"):
+        await initiate_agent_scan(**kwargs)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_token_bound_to_targets_and_action() -> None:
+    """Test: token bound to targets and action."""
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    disconnect = respx.post(f"{API}/agents/actions/disconnect")
+    token = (await _preview(initiate_agent_scan, agent_ids=[AGENT], reason=REASON))[
+        "confirmation_token"
+    ]
+
+    # A scan preview cannot authorise a disconnect of the same agent ...
+    with pytest.raises(ToolError, match="doesn't match"):
+        await disconnect_agents_from_network(
+            agent_ids=[AGENT], reason=REASON, confirm=True, confirmation_token=token
+        )
+    # ... nor a scan of a different agent.
+    with pytest.raises(ToolError, match="doesn't match"):
+        await initiate_agent_scan(
+            agent_ids=[AGENT2], reason=REASON, confirm=True, confirmation_token=token
+        )
+    assert not disconnect.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_token_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test: token expires."""
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    now = 1_000_000_000.0
+    monkeypatch.setattr("purple_mcp.tools.response.time.time", lambda: now)
+    token = (await _preview(initiate_agent_scan, agent_ids=[AGENT], reason=REASON))[
+        "confirmation_token"
+    ]
+    now += 2 * response_tools.CONFIRM_TTL + 1
+    with pytest.raises(ToolError, match="doesn't match"):
+        await initiate_agent_scan(
+            agent_ids=[AGENT], reason=REASON, confirm=True, confirmation_token=token
+        )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_preview_refuses_unknown_targets() -> None:
+    """Test: preview refuses unknown targets."""
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT))
+    with pytest.raises(ValueError, match=f"outside the response token's scope: \\['{AGENT2}'\\]"):
+        await disconnect_agents_from_network(agent_ids=[AGENT, AGENT2], reason=REASON)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_affected_mismatch_is_flagged() -> None:
+    """Test: affected mismatch is flagged."""
+    respx.get(f"{API}/agents").mock(return_value=_agents(AGENT, AGENT2))
+    respx.post(f"{API}/agents/actions/disconnect").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    token = (
+        await _preview(disconnect_agents_from_network, agent_ids=[AGENT, AGENT2], reason=REASON)
+    )["confirmation_token"]
+    done = json.loads(
+        await disconnect_agents_from_network(
+            agent_ids=[AGENT, AGENT2], reason=REASON, confirm=True, confirmation_token=token
+        )
+    )
+    assert "warning" in done
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mitigate_preview_and_confirm() -> None:
+    """Test: mitigate preview and confirm."""
+    respx.get(f"{API}/threats").mock(return_value=_threats(THREAT))
+    action = respx.post(f"{API}/threats/mitigate/kill").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    preview = await _preview(mitigate_threats, threat_ids=[THREAT], action="kill", reason=REASON)
+    assert preview["targets"][0]["threatName"] == "evil.exe"
+    await mitigate_threats(
+        threat_ids=[THREAT],
+        action="kill",
+        reason=REASON,
+        confirm=True,
+        confirmation_token=preview["confirmation_token"],
+    )
+    assert action.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_triage_sets_both_fields() -> None:
+    """Test: triage sets both fields."""
+    respx.get(f"{API}/threats").mock(return_value=_threats(THREAT))
+    verdict = respx.post(f"{API}/threats/analyst-verdict").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    status = respx.post(f"{API}/threats/incident").mock(
+        return_value=httpx.Response(200, json={"data": {"affected": 1}})
+    )
+    kwargs: dict[str, Any] = {
+        "threat_ids": [THREAT],
+        "reason": REASON,
+        "analyst_verdict": "true_positive",
+        "incident_status": "in_progress",
+    }
+    token = (await _preview(update_threat_triage, **kwargs))["confirmation_token"]
+    done = json.loads(await update_threat_triage(**kwargs, confirm=True, confirmation_token=token))
+    assert done["affected"] == {"analyst_verdict": 1, "incident_status": 1}
+    assert verdict.called and status.called
+
+
+# --------------------------------------------------------------------------- input validation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ids", "match"),
+    [
+        ([], "At least one"),
+        (["  "], "At least one"),
+        (["123"], "Invalid agent"),
+        (["11111111111111111a"], "Invalid agent"),
+        ([str(10**17 + i) for i in range(MAX_TARGETS + 1)], f"At most {MAX_TARGETS}"),
+    ],
+)
+async def test_invalid_ids_rejected(ids: list[str], match: str) -> None:
+    """Test: invalid ids rejected."""
+    with pytest.raises(ValueError, match=match):
+        await disconnect_agents_from_network(agent_ids=ids, reason=REASON)
+
+
+@pytest.mark.asyncio
+async def test_reason_required() -> None:
+    """Test: reason required."""
+    with pytest.raises(ValueError, match="reason"):
+        await initiate_agent_scan(agent_ids=[AGENT], reason="   ")
+
+
+@pytest.mark.asyncio
+async def test_triage_needs_a_field() -> None:
+    """Test: triage needs a field."""
+    with pytest.raises(ValueError, match="analyst_verdict, incident_status, or both"):
+        await update_threat_triage(threat_ids=[THREAT], reason=REASON)
+
+
+@pytest.mark.asyncio
+async def test_invalid_mitigation_action() -> None:
+    """Test: invalid mitigation action."""
+    with pytest.raises(ValueError, match="action must be one of"):
+        await mitigate_threats(threat_ids=[THREAT], action="delete", reason=REASON)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_refuses_when_writes_disabled(writes_enabled: SimpleNamespace) -> None:
+    """Test: refuses when writes disabled."""
+    writes_enabled.allow_writes = False
+    with pytest.raises(ToolError, match="disabled"):
+        await initiate_agent_scan(agent_ids=[AGENT], reason=REASON)
+
+
+# --------------------------------------------------------------------------- registration
+
+
+@pytest.mark.asyncio
+async def test_register_response_tools_with_annotations() -> None:
+    """Test: register response tools with annotations."""
+    mcp: fastmcp.FastMCP[None] = fastmcp.FastMCP("test")
+    register_response_tools(mcp)
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    assert set(tools) == set(RESPONSE_TOOL_NAMES)
+    for tool in tools.values():
+        assert tool.annotations is not None
+        assert tool.annotations.readOnlyHint is False
+    assert tools["disconnect_agents_from_network"].annotations.destructiveHint is True
+    assert tools["mitigate_threats"].annotations.destructiveHint is True
+    schema = tools["disconnect_agents_from_network"].inputSchema
+    assert schema["properties"]["agent_ids"]["maxItems"] == MAX_TARGETS
+    assert set(schema["required"]) == {"agent_ids", "reason"}

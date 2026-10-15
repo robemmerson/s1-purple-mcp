@@ -97,6 +97,7 @@ from purple_mcp.tools.misconfigurations import (
 )
 from purple_mcp.tools.purple_ai import PURPLE_AI_DESCRIPTION, purple_ai
 from purple_mcp.tools.purple_utils import ISO_TO_UNIX_TIMESTAMP_DESCRIPTION, iso_to_unix_timestamp
+from purple_mcp.tools.response import register_response_tools
 from purple_mcp.tools.sdl import (
     GET_TIMESTAMP_RANGE_DESCRIPTION,
     POWERQUERY_DESCRIPTION,
@@ -175,6 +176,14 @@ app.tool(description=THREAT_INTEL_GET_FILE_BEHAVIOR_DESCRIPTION)(threat_intel_ge
 app.tool(description=CVE_SEARCH_BY_ID_DESCRIPTION)(cve_search_by_id)
 app.tool(description=CVE_SEARCH_BY_VENDOR_DESCRIPTION)(cve_search_by_vendor)
 app.tool(description=CVE_DATABASE_STATUS_DESCRIPTION)(cve_database_status)
+
+# Response actions (writes) are registered only when explicitly enabled. If settings fail to load
+# here they stay unregistered; the CLI validates settings before importing this module.
+_startup_settings: Settings | None = None
+with contextlib.suppress(Exception):
+    _startup_settings = get_settings()
+if _startup_settings is not None and _startup_settings.allow_writes:
+    register_response_tools(app)
 
 if tool_errors_as_text_enabled():
     install_tool_errors_as_text(app)

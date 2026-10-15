@@ -12,7 +12,9 @@ from pydantic import ValidationError
 
 from purple_mcp import __version__
 from purple_mcp.config import (
+    ALLOW_WRITES_ENV,
     ENV_PREFIX,
+    RESPONSE_TOKEN_ENV,
     SDL_BASE_URL_ENV,
     SDL_QUERY_ORIGIN_ENV,
     Settings,
@@ -32,6 +34,8 @@ def clear_env_and_cache(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None
         f"{ENV_PREFIX}SDL_CONSOLE_ACCOUNT_IDS",
         f"{ENV_PREFIX}SDL_BASE_URL",
         f"{ENV_PREFIX}SDL_QUERY_ORIGIN",
+        ALLOW_WRITES_ENV,
+        RESPONSE_TOKEN_ENV,
     ):
         monkeypatch.delenv(var, raising=False)
     _load_base_settings.cache_clear()
@@ -1058,3 +1062,57 @@ def test_deprecated_env_var_emits_startup_warning(
         f"Expected a WARNING mentioning {deprecated_var}, got: "
         f"{[r.message for r in caplog.records]}"
     )
+
+
+def test_writes_disabled_by_default(minimal_env: None) -> None:
+    """Response actions are off and need no response token unless enabled."""
+    settings = Settings()
+    assert settings.allow_writes is False
+    assert settings.response_token is None
+
+
+def test_writes_enabled_with_separate_token(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enabling writes with a distinct response token is accepted."""
+    monkeypatch.setenv(ALLOW_WRITES_ENV, "true")
+    monkeypatch.setenv(RESPONSE_TOKEN_ENV, "  write-token  ")
+    settings = Settings()
+    assert settings.allow_writes is True
+    assert settings.response_token == "write-token"
+
+
+@pytest.mark.parametrize("token", [None, "", "   "])
+def test_writes_enabled_without_response_token_fails(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch, token: str | None
+) -> None:
+    """Enabling writes without a response token refuses to start."""
+    monkeypatch.setenv(ALLOW_WRITES_ENV, "true")
+    if token is not None:
+        monkeypatch.setenv(RESPONSE_TOKEN_ENV, token)
+    with pytest.raises(ValidationError, match=RESPONSE_TOKEN_ENV):
+        Settings()
+
+
+def test_response_token_must_differ_from_console_token(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reusing the read token for writes is rejected."""
+    monkeypatch.setenv(ALLOW_WRITES_ENV, "true")
+    monkeypatch.setenv(RESPONSE_TOKEN_ENV, "token")
+    with pytest.raises(ValidationError, match="separate token"):
+        Settings()
+
+
+def test_response_token_registered_as_secret(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The response token is redacted from logs like the other tokens."""
+    from purple_mcp import logging_security
+
+    registered: list[str] = []
+    monkeypatch.setattr(logging_security, "register_secret", registered.append)
+    monkeypatch.setenv(ALLOW_WRITES_ENV, "true")
+    monkeypatch.setenv(RESPONSE_TOKEN_ENV, "write-token")
+    get_settings()
+    assert "write-token" in registered
