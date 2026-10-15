@@ -183,7 +183,7 @@ _startup_settings: Settings | None = None
 with contextlib.suppress(Exception):
     _startup_settings = get_settings()
 if _startup_settings is not None and _startup_settings.allow_writes:
-    register_response_tools(app)
+    register_response_tools(app, _startup_settings.agent_confirmable_actions)
 
 if tool_errors_as_text_enabled():
     install_tool_errors_as_text(app)

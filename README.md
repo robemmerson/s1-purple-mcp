@@ -350,14 +350,16 @@ scope it to the Account or Site the agent should be able to touch.
 
 #### Who approves: `PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS`
 
-Each preview carries an `approval` field and a `next` instruction for the calling agent:
+Everything the server tells the calling agent about approval follows this setting, per action:
+the tool description, the `confirm` parameter's description, each preview's `approval` and `next`
+fields, and the errors returned for a missing, reused or mismatched confirmation token.
 
-- By default every action gets `"approval": "human"`, and `next` tells the agent to show the
-  preview to the user and confirm only after they approve it.
-- For actions named in `PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS` (comma-separated tool names, for
-  example `initiate_agent_scan,disconnect_agents_from_network`), the preview says
-  `"approval": "agent_policy"`. Its `next` tells the agent to check the targets and confirm itself if
-  its operating policy authorises the action, or escalate to a human if anything is unexpected.
+- By default every action asks for a human. Previews say `"approval": "human"`, and the agent is
+  told to show the preview to the user and confirm only after they approve it.
+- Actions named in `PURPLEMCP_AGENT_CONFIRMABLE_ACTIONS` (comma-separated tool names, for example
+  `initiate_agent_scan,disconnect_agents_from_network`) say `"approval": "agent_policy"`. The agent
+  is told that no human approval is needed: check the preview's targets, and confirm if its
+  operating policy authorises the action, or escalate to a human if anything is unexpected.
 
 Use this for deployments where an autonomous agent, with no human present, is authorised to run
 those actions. It **changes guidance text only**. Every action still needs a preview and the
