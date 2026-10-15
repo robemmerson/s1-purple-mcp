@@ -23,8 +23,10 @@ This server exposes SentinelOne's platform through the Model Context Protocol:
 - **CVE Search**: Query public CVE databases for vulnerability details
 - **Threat Intelligence**: Get file, URL, domain, and IP analysis from VirusTotal
 
-Purple AI MCP is a read-only service - you cannot make changes to your account or any objects
-within your account from this MCP.
+Purple AI MCP is read-only by default - you cannot make changes to your account or any objects
+within your account from this MCP. A small set of [response actions](#response-actions-opt-in)
+(network isolation, scans, threat mitigation and triage) can be enabled explicitly, with their own
+API token and a preview-then-confirm step for every change.
 
 ## Quick Start
 
@@ -316,6 +318,36 @@ Query VirusTotal/Google Threat Intelligence for file, URL, domain, and IP analys
 
 **Note:** Requires `PURPLEMCP_VT_API_KEY` environment variable with a valid VirusTotal API key.
 
+### Response Actions (opt-in)
+
+The only tools that change anything. They are **not registered** unless
+`PURPLEMCP_ALLOW_WRITES=true`, and then they authenticate with `PURPLEMCP_RESPONSE_TOKEN`, a
+separate token from `PURPLEMCP_CONSOLE_TOKEN` (the server refuses to start if the two match):
+
+- `disconnect_agents_from_network(agent_ids, reason)` - Network-isolate agents. They keep their
+  connection to the management console, so they can be reconnected from the console.
+- `initiate_agent_scan(agent_ids, reason)` - Start a full disk scan.
+- `mitigate_threats(threat_ids, action, reason)` - `kill`, `quarantine`, `remediate`,
+  `rollback-remediation` or `un-quarantine`.
+- `update_threat_triage(threat_ids, reason, analyst_verdict, incident_status)` - Set the analyst
+  verdict and/or incident status.
+
+Every response action runs in two steps:
+
+1. Called without `confirm`, it looks the targets up with the response token and returns a preview
+   (host names, sites, current status) plus a `confirmation_token`. Nothing changes. Any ID the
+   token cannot see fails the whole call.
+2. Called again with the same arguments, `confirm=true` and that token, it performs the action.
+   The token is an HMAC over the exact action and arguments, valid for 30 minutes, usable once,
+   and invalidated by a server restart.
+
+Each call takes an explicit list of at most 10 IDs (never a filter, which could match the whole
+estate) and a `reason`, which is written to the server log with the result. Over HTTP the tools
+sit behind the same `MCP_API_KEY` bearer authentication as everything else.
+
+Create the response token for a dedicated Service User whose role allows only these actions, and
+scope it to the Account or Site the agent should be able to touch.
+
 ## Environment Variables
 
 ### Required
@@ -352,6 +384,10 @@ Query VirusTotal/Google Threat Intelligence for file, URL, domain, and IP analys
   argument validation failures and unknown tool names; each conversion is logged as a warning.
   Enable it only for clients that abort the run on `isError: true` (for example Microsoft Foundry
   Agent Service), so the model sees the error and can retry. Note: no `PURPLEMCP_` prefix.
+- `PURPLEMCP_ALLOW_WRITES` - Register the [response-action tools](#response-actions-opt-in)
+  (default: `false`). Requires `PURPLEMCP_RESPONSE_TOKEN`.
+- `PURPLEMCP_RESPONSE_TOKEN` - API token used only by the response-action tools. Must differ from
+  `PURPLEMCP_CONSOLE_TOKEN`; redacted from logs like the other tokens.
 - `PURPLEMCP_STATELESS_HTTP` - Enable stateless HTTP mode for serverless deployments (e.g., Amazon
   Bedrock AgentCore) - see [deployment guide](deploy/aws_agentcore/BEDROCK_AGENTCORE_DEPLOYMENT.md)
 

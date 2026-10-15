@@ -63,6 +63,8 @@ SDL_BASE_URL_ENV: Final[str] = f"{ENV_PREFIX}SDL_BASE_URL"
 SDL_QUERY_ORIGIN_ENV: Final[str] = f"{ENV_PREFIX}SDL_QUERY_ORIGIN"
 SDL_CONSOLE_ACCOUNT_IDS_ENV: Final = f"{ENV_PREFIX}SDL_CONSOLE_ACCOUNT_IDS"
 SDL_CONSOLE_SITE_IDS_ENV: Final = f"{ENV_PREFIX}SDL_CONSOLE_SITE_IDS"
+ALLOW_WRITES_ENV: Final[str] = f"{ENV_PREFIX}ALLOW_WRITES"
+RESPONSE_TOKEN_ENV: Final[str] = f"{ENV_PREFIX}RESPONSE_TOKEN"
 
 # Used solely for integration testing but defined here for consistency:
 SDL_INT_TEST_SECOND_ACCOUNT_ID_ENV: Final = f"{ENV_PREFIX}SDL_INT_TEST_SECOND_ACCOUNT_ID"
@@ -334,6 +336,29 @@ class Settings(BaseSettings):
         validation_alias=VT_TIMEOUT_ENV,
     )
 
+    # Response actions (opt-in writes)
+    # Off by default. When on, the response tools are registered and authenticate with their own
+    # token so the read token can stay read-only and the two can be revoked separately.
+    allow_writes: bool = Field(
+        default=False,
+        description="Register the response-action (write) tools",
+        validation_alias=ALLOW_WRITES_ENV,
+    )
+
+    response_token: str | None = Field(
+        default=None,
+        description="API token used only by the response-action tools; must differ from the console token",
+        validation_alias=RESPONSE_TOKEN_ENV,
+    )
+
+    @field_validator("response_token", mode="before")
+    @classmethod
+    def validate_response_token(cls, value: object) -> object:
+        """Treat an empty or whitespace-only response token as unset."""
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
     @field_validator("sentinelone_console_base_url")
     @classmethod
     def validate_console_base_url(cls, v: str | None) -> str | None:
@@ -553,9 +578,17 @@ class Settings(BaseSettings):
         if not self.sentinelone_console_base_url:
             errors.append(f"{CONSOLE_BASE_URL_ENV}")
 
+        if self.allow_writes and not self.response_token:
+            errors.append(f"{RESPONSE_TOKEN_ENV} (required when {ALLOW_WRITES_ENV} is true)")
+
         if errors:
             raise ValueError(
                 f"The following environment variables must be set: {', '.join(errors)}"
+            )
+
+        if self.response_token and self.response_token == self.graphql_service_token:
+            raise ValueError(
+                f"{RESPONSE_TOKEN_ENV} must be a separate token from {CONSOLE_TOKEN_ENV}"
             )
 
         logger.info("Application configuration loaded successfully")
@@ -593,6 +626,12 @@ class Settings(BaseSettings):
         logger.info(
             "%sCONSOLE_TOKEN is configured (used for both Console and SDL access)", ENV_PREFIX
         )
+        if self.allow_writes:
+            logger.warning(
+                "Response-action tools are ENABLED (%s=true) and use %s",
+                ALLOW_WRITES_ENV,
+                RESPONSE_TOKEN_ENV,
+            )
 
 
 _DEPRECATED_ENV_VARS: Final[tuple[str, ...]] = (
@@ -639,6 +678,8 @@ def _load_base_settings() -> Settings:
                     register_secret(settings.graphql_service_token)
                 if settings.vt_api_key:
                     register_secret(settings.vt_api_key)
+                if settings.response_token:
+                    register_secret(settings.response_token)
             except ImportError:
                 # Filter module not available - this shouldn't happen in normal operation
                 logger.warning("Logging security filter not available - tokens may appear in logs")
